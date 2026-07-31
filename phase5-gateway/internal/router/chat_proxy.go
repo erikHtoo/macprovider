@@ -76,6 +76,8 @@ const (
 	legacySettlementPolicyVersion     = "spec022-prereq-v0"
 	settlementHoldFallbackTTL         = 5 * time.Minute
 	maxStreamingFallbackMetadataBytes = int64(64 << 10)
+	decodeIdleSlowModelProgressTokens = 5
+	decodeIdleSlowModelMax            = 60 * time.Second
 )
 
 var errStreamingIdleTimeout = errors.New("streaming upstream idle timeout")
@@ -219,6 +221,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	dedupeEntrypoint := idlessDedupeEntrypointChat
+	dedupeBody := body
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+		translatedBody, translateErr := adapter.translateRequest(body)
+		if translateErr != nil {
+			writeResponsesTranslationError(w, http.StatusBadRequest, translateErr)
+			return
+		}
+		dedupeEntrypoint = idlessDedupeEntrypointResponses
+		body = translatedBody
+	}
 	chat, err := parseChatRequest(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error())
@@ -273,11 +286,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		requestIDClass(r) == retry503RequestIDClassGatewayGenerated &&
 		strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
 		dedupeFingerprint = idlessRequestFingerprint(
+			dedupeEntrypoint,
 			subject.AccountID,
 			subject.DemoTokenHash,
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")),
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Retry")),
-			body,
+			dedupeBody,
 		)
 		entry, adopted := s.idlessDedupe.claim(dedupeFingerprint, requestID(r), s.now(), dedupeWindow)
 		switch {
@@ -297,11 +311,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// fall-through 409 would name an id the buyer cannot correlate.
 			r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, entry.requestID))
 			w.Header().Set("X-Request-ID", entry.requestID)
+			var replayAdapter *responsesAdapter
+			if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+				replayAdapter = adapter
+				replayAdapter.beginReplayPassthrough()
+			}
 			if s.replayIdlessDuplicate(w, r, subject, dailyQuota, entry, dedupeWindow, deadlines) {
 				return
 			}
+			if replayAdapter != nil {
+				replayAdapter.endReplayPassthrough()
+			}
 		default:
 			sw.armDedupeCapture(idlessDedupeMaxEntryBytes)
+			if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+				adapter.armDedupeCapture(idlessDedupeMaxEntryBytes)
+			}
 			defer func() {
 				if dedupeFingerprint == "" {
 					return
@@ -316,12 +341,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
 					panic(recovered)
 				}
+				adapter := responsesAdapterFromContext(r.Context())
+				if adapter != nil {
+					adapter.finish()
+				}
 				// Publish is gated on a buyer-visible 2xx, not on settlement
 				// finality: a SPEC-022 hold is still a delivered answer, and
 				// a retry of it must not re-run inference. A buyer who
 				// disconnected never saw the whole response, so nothing is
 				// cached for them (their partial is settled as usual).
-				if sw.dedupePublishable() && r.Context().Err() == nil {
+				if adapter != nil && sw.dedupeDelivered2xx() && r.Context().Err() == nil {
+					capture := adapter.dedupeCapture()
+					if capture != nil {
+						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
+							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							capture, s.now())
+						return
+					}
+					if adapter.dedupeDeliveredButUncacheable() {
+						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
+							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							nil, s.now())
+						return
+					}
+					s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
+					return
+				}
+				if adapter == nil && sw.dedupePublishable() && r.Context().Err() == nil {
 					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
 						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
 						sw.dedupeCapture(), s.now())
@@ -563,7 +609,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, deadlines, structuredStreaming, window, timing)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, model, retryExhausted, priorProviderDispatch, deadlines, structuredStreaming, window, timing)
 		return
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, window)
@@ -828,10 +874,23 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	} else {
 		tokenSource = "provider_reported"
 	}
+	body = usageBodyWithTokenUsage(body, usage)
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
+		if err := adapter.prepareNonStreamingResponse(body); err != nil {
+			settlePrompt, settleCompletion, settleSource := promptEstimate, int64(0), "gateway_estimated"
+			if ok {
+				settlePrompt, settleCompletion, settleSource = usage.PromptTokens, usage.CompletionTokens, tokenSource
+			}
+			if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, settlePrompt, settleCompletion, maxUsageTokens, settleSource, "invalid_provider_response", resp.Header) {
+				return
+			}
+			writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
+			return
+		}
+	}
 	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
 		return
 	}
-	body = usageBodyWithTokenUsage(body, usage)
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
@@ -865,7 +924,7 @@ func emitProviderAttribution(dst, src http.Header) {
 	}
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, model string, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
 	upstreamCtx := deadlines.Context()
 	cancelUpstream := deadlines.Cancel
 	if resp.StatusCode == http.StatusServiceUnavailable {
@@ -958,7 +1017,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// keeps the socket warm with role-only or usage-only frames no longer
 	// holds the stream open forever. A zero deadline preserves the legacy
 	// "no idle timeout" sentinel (streaming_idle_ms <= 0).
-	idleTimeout := s.cfg.StreamingIdleTimeout()
+	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg)
 	progressDeadline := streamingProgressDeadline(idleTimeout)
 	var emitted int64
 	var serializedEmitted int64
@@ -1248,7 +1307,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if errors.Is(err, errStreamingIdleTimeout) {
 			slog.Warn("streaming coordinator idle timeout",
 				"request_id", requestID(r),
-				"timeout_ms", s.cfg.Timeouts.StreamingIdleMS,
+				"timeout_ms", idleTimeout.Milliseconds(),
 				"deadline_phase", deadlineReasonDecodeIdle,
 			)
 			deadlines.noteReason(deadlineReasonDecodeIdle)
@@ -1360,6 +1419,40 @@ func streamingProgressDeadline(idleTimeout time.Duration) time.Time {
 		return time.Time{}
 	}
 	return time.Now().Add(idleTimeout)
+}
+
+func adaptiveDecodeIdleTimeout(model string, cfg config.Config) time.Duration {
+	base := cfg.StreamingIdleTimeout()
+	if base <= 0 {
+		return base
+	}
+	expectedTPS, ok := expectedDecodeTokensPerSecond(model)
+	if !ok || expectedTPS <= 0 {
+		return base
+	}
+	perToken := time.Duration(math.Ceil(float64(time.Second) / expectedTPS))
+	adaptive := perToken * decodeIdleSlowModelProgressTokens
+	if adaptive > decodeIdleSlowModelMax {
+		adaptive = decodeIdleSlowModelMax
+	}
+	if adaptive > base {
+		return adaptive
+	}
+	return base
+}
+
+func expectedDecodeTokensPerSecond(model string) (float64, bool) {
+	name := strings.ToLower(model)
+	switch {
+	case strings.Contains(name, "70b"), strings.Contains(name, "72b"):
+		return 0.17, true
+	case strings.Contains(name, "30b"), strings.Contains(name, "32b"):
+		return 0.25, true
+	case strings.Contains(name, "20b"), strings.Contains(name, "22b"), strings.Contains(name, "24b"):
+		return 0.5, true
+	default:
+		return 0, false
+	}
 }
 
 // readStreamingLineWithIdleTimeout reads one SSE line, giving up at deadline.
@@ -2745,7 +2838,11 @@ func (sw *statusWriter) armDedupeCapture(limit int) {
 // dedupePublishable reports whether the captured response may be replayed to
 // an identical id-less retry: a complete, buyer-visible 2xx that fit the cap.
 func (sw *statusWriter) dedupePublishable() bool {
-	return sw.captureArmed && !sw.poisoned && !sw.overflowed &&
+	return sw.dedupeDelivered2xx() && !sw.overflowed
+}
+
+func (sw *statusWriter) dedupeDelivered2xx() bool {
+	return sw.captureArmed && !sw.poisoned &&
 		sw.statusCode >= 200 && sw.statusCode < 300
 }
 
