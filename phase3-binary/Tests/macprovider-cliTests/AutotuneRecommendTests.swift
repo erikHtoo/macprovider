@@ -2384,6 +2384,12 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(outcomes.diagnostics[badKey]).contains("hash mismatch"))
         XCTAssertNotNil(outcomes.benchmarks[goodKey])
         XCTAssertEqual(prober.probedModels, [goodArtifactPath])
+        XCTAssertEqual(prober.probedArtifactBindings.count, 1)
+        XCTAssertEqual(prober.probedArtifactBindings[0]?.path, goodArtifactPath)
+        XCTAssertEqual(
+            prober.probedArtifactBindings[0]?.sha256,
+            request.candidateCatalog.rows[goodKey]?.modelSHA256
+        )
     }
 
     func testBenchmarksScopesToCandidateModelsWhenFilterProvided() async throws {
@@ -2507,26 +2513,111 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testProbeSafetyAssessmentFailsClosedOnUnavailableTelemetry() {
-        let unavailable = ProbeSafetyAssessment.assess(
-            before: ProbeSafetySample(pageouts: nil, thermalState: nil),
-            after: ProbeSafetySample(pageouts: nil, thermalState: nil)
-        )
+        // Whole-series unknown pressure => fail closed (matches the prior
+        // nil-fail-closed contract). All-unknown thermal also throttles.
+        let unavailable = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: nil),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: nil),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: nil),
+        ])
         XCTAssertTrue(unavailable.swapDetected)
         XCTAssertTrue(unavailable.thermalThrottleDetected)
+        XCTAssertFalse(unavailable.swapObservedUnderLoad)
 
-        let safe = ProbeSafetyAssessment.assess(
-            before: ProbeSafetySample(pageouts: 10, thermalState: .nominal),
-            after: ProbeSafetySample(pageouts: 10, thermalState: .fair)
-        )
+        // Healthy series: sustained normal pressure, benign thermal.
+        let safe = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .fair),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
         XCTAssertFalse(safe.swapDetected)
         XCTAssertFalse(safe.thermalThrottleDetected)
+        XCTAssertFalse(safe.swapObservedUnderLoad)
+    }
 
-        let unsafe = ProbeSafetyAssessment.assess(
-            before: ProbeSafetySample(pageouts: 10, thermalState: .nominal),
-            after: ProbeSafetySample(pageouts: 11, thermalState: .serious)
-        )
-        XCTAssertTrue(unsafe.swapDetected)
-        XCTAssertTrue(unsafe.thermalThrottleDetected)
+    func testProbeSafetyAssessmentDetectsSustainedCriticalThrash() {
+        // #742's real incident: a genuinely thrashing node holds CRITICAL
+        // memory pressure across the probe => hard swap veto.
+        let thrash = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .fair),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+        ])
+        XCTAssertTrue(thrash.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentDoesNotBlockIncidentalPressureOn8GB() {
+        // 8 GB Mac running the smallest model: mostly normal pressure with a
+        // single transient WARNING blip. This must NOT be read as thrash, so
+        // llama-3.2-3b stays paid-eligible (the growth-blocker fix).
+        let incidental = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .fair),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
+        XCTAssertFalse(incidental.swapDetected)
+        XCTAssertFalse(incidental.swapObservedUnderLoad)
+    }
+
+    func testProbeSafetyAssessmentFlagsAdvisoryOnWarningMajority() {
+        // Sustained WARNING majority (no critical majority): do not block, but
+        // flag the advisory observation for operators / telemetry.
+        let warned = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .nominal),
+        ])
+        XCTAssertFalse(warned.swapDetected)
+        XCTAssertTrue(warned.swapObservedUnderLoad)
+    }
+
+    func testProbeSafetyAssessmentSingleTransientUnknownDoesNotBlock() {
+        // A lone unknown reading amid healthy samples must not fail closed.
+        let transient = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
+        XCTAssertFalse(transient.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentShortProbeSustainedCriticalStillBlocks() {
+        // Round-1 audit fix (MEDIUM): a short probe that yields only the two
+        // synchronous samples must still veto when both read CRITICAL — the old
+        // >= 3 total-sample floor let this fail open.
+        let shortThrash = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+        ])
+        XCTAssertTrue(shortThrash.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentLoneCriticalSpikeDoesNotBlock() {
+        // A single incidental CRITICAL reading among healthy samples is not
+        // sustained thrash (requires >= 2 critical), so it must not block.
+        let spike = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
+        XCTAssertFalse(spike.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentUnknownDoesNotDiluteCriticalMajority() {
+        // Round-1 audit fix (MEDIUM): .unknown readings must not dilute the
+        // denominator. Two CRITICAL among many UNKNOWN is a critical majority of
+        // the READABLE samples and must veto (the old raw-count denominator let
+        // this fail open).
+        let diluted = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .serious),
+        ])
+        XCTAssertTrue(diluted.swapDetected)
     }
 
     func testBothMarketFallbacksProduceLowConfidence() throws {
@@ -3894,6 +3985,7 @@ final class AutotuneRecommendTests: XCTestCase {
 private final class RecordingStage1Prober: Stage1Probing {
     private let results: [String: Stage1ProbeResult]
     private(set) var probedModels: [String] = []
+    private(set) var probedArtifactBindings: [CandidateArtifactBinding?] = []
 
     init(results: [String: Stage1ProbeResult]) {
         self.results = results
@@ -3907,13 +3999,34 @@ private final class RecordingStage1Prober: Stage1Probing {
         gateTTFTMS: Int,
         replicates: Int
     ) async throws -> Stage1ProbeResult {
+        try await probe(
+            model: model,
+            port: port,
+            runner: runner,
+            targetContext: targetContext,
+            gateTTFTMS: gateTTFTMS,
+            replicates: replicates,
+            artifactBinding: nil
+        )
+    }
+
+    func probe(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        gateTTFTMS: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?
+    ) async throws -> Stage1ProbeResult {
         probedModels.append(model)
+        probedArtifactBindings.append(artifactBinding)
         return results[model] ?? .infeasible(reason: "missing stub probe result", nErr: 1)
     }
 }
 
 private struct StaticProbeSafetySampler: ProbeSafetySampling {
     func sample() -> ProbeSafetySample {
-        ProbeSafetySample(pageouts: 10, thermalState: .nominal)
+        ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal)
     }
 }

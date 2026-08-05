@@ -16,6 +16,12 @@ public enum LogLevel: String, Sendable {
     case critical
 }
 
+public enum ContinuousBatchingMode: String, Sendable {
+    case off
+    case canary
+    case on
+}
+
 public struct AppConfig: Equatable, Sendable {
     public var port: Int
     public var model: String?
@@ -108,11 +114,18 @@ public struct AppConfig: Equatable, Sendable {
     // Triple-exposed: yaml key `prefill_step_size`, env `MACPROVIDER_PREFILL_STEP_SIZE`,
     // CLI `--prefill-step-size`.
     public var prefillStepSize: Int
+    public var continuousBatching: ContinuousBatchingMode
+    public var continuousBatchQueueLimit: Int?
 
     // SPEC-037 FR-KVP11: encrypted KV survival disk tier. Default-off; resolved
     // fail-closed (invalid value ⇒ tier disabled + `errors` populated, never a
     // process abort). See `KVDiskCacheConfig`.
     public var kvDiskCache: KVDiskCacheConfig
+
+    // SPEC-039 FR-PKV14: provider-local paged KV residency engine. Default-off;
+    // resolved fail-closed (invalid value ⇒ paged mode disabled + `errors`
+    // populated, never a partial enable).
+    public var pagedKV: PagedKVConfig
 
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
@@ -169,7 +182,10 @@ public struct AppConfig: Equatable, Sendable {
             managedBy: nil,
             streamInterval: 1,
             prefillStepSize: 512,
-            kvDiskCache: .defaults()
+            continuousBatching: .off,
+            continuousBatchQueueLimit: nil,
+            kvDiskCache: .defaults(),
+            pagedKV: .defaults()
         )
     }
 }
@@ -177,6 +193,8 @@ public struct AppConfig: Equatable, Sendable {
 public struct CLIOverrides: Equatable, Sendable {
     public var port: Int?
     public var model: String?
+    public var modelArtifactPath: String?
+    public var modelArtifactSHA256: String?
     public var draftModel: String?
     public var draftModelArtifactSHA256: String?
     public var numDraftTokens: Int?
@@ -210,12 +228,18 @@ public struct CLIOverrides: Equatable, Sendable {
     public var idlePrewarmRunOnBattery: Bool?
     public var streamInterval: Int?
     public var prefillStepSize: Int?
+    public var continuousBatching: String?
+    public var continuousBatchQueueLimit: Int?
     // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
     public var kvDiskCache: KVDiskCacheCLIOverrides
+    // SPEC-039 FR-PKV14: paged KV CLI flags (`--paged-kv-*`).
+    public var pagedKV: PagedKVCLIOverrides
 
     public init(
         port: Int? = nil,
         model: String? = nil,
+        modelArtifactPath: String? = nil,
+        modelArtifactSHA256: String? = nil,
         draftModel: String? = nil,
         draftModelArtifactSHA256: String? = nil,
         numDraftTokens: Int? = nil,
@@ -246,10 +270,15 @@ public struct CLIOverrides: Equatable, Sendable {
         idlePrewarmRunOnBattery: Bool? = nil,
         streamInterval: Int? = nil,
         prefillStepSize: Int? = nil,
-        kvDiskCache: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides()
+        kvDiskCache: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides(),
+        continuousBatching: String? = nil,
+        continuousBatchQueueLimit: Int? = nil,
+        pagedKV: PagedKVCLIOverrides = PagedKVCLIOverrides()
     ) {
         self.port = port
         self.model = model
+        self.modelArtifactPath = modelArtifactPath
+        self.modelArtifactSHA256 = modelArtifactSHA256
         self.draftModel = draftModel
         self.draftModelArtifactSHA256 = draftModelArtifactSHA256
         self.numDraftTokens = numDraftTokens
@@ -280,7 +309,10 @@ public struct CLIOverrides: Equatable, Sendable {
         self.idlePrewarmRunOnBattery = idlePrewarmRunOnBattery
         self.streamInterval = streamInterval
         self.prefillStepSize = prefillStepSize
+        self.continuousBatching = continuousBatching
+        self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.kvDiskCache = kvDiskCache
+        self.pagedKV = pagedKV
     }
 }
 
@@ -334,6 +366,28 @@ public enum ConfigLoader {
         }
         config.kvDiskCache = KVDiskCacheConfigResolver.resolve(
             yaml: kvYAML, environment: environment, cli: cli.kvDiskCache)
+        var pagedYAML: [String: Any]?
+        var pagedYAMLShapeError = false
+        if fileExists(configPath), let text = try? readFile(configPath),
+           let root = try? Yams.load(yaml: text) as? [String: Any] {
+            if let rawPaged = root["paged_kv"], !(rawPaged is NSNull) {
+                if let map = rawPaged as? [String: Any] {
+                    pagedYAML = map
+                } else {
+                    pagedYAMLShapeError = true
+                }
+            }
+        }
+        config.pagedKV = PagedKVConfigResolver.resolve(
+            yaml: pagedYAML, environment: environment, cli: cli.pagedKV)
+        // A malformed `paged_kv:` block (scalar/list where a map is required) is a config
+        // shape error that must NEVER be silently dropped: always surface the warning and
+        // fail closed by disabling paged mode, regardless of any env/CLI override presence.
+        // (Env/CLI precedence still governs the well-formed-map case via the resolver above.)
+        if pagedYAMLShapeError {
+            config.pagedKV.enabled = false
+            config.pagedKV.errors.append("invalid paged_kv=<redacted>; expected map; paged_kv disabled")
+        }
 
         return config
     }
@@ -362,8 +416,10 @@ public enum ConfigLoader {
         }
 
         let raw: Any?
+        let rawNode: Node?
         do {
             raw = try Yams.load(yaml: text)
+            rawNode = try Yams.compose(yaml: text)
         } catch {
             throw ConfigError.invalidYAML(path: path, underlying: String(describing: error))
         }
@@ -427,6 +483,18 @@ public enum ConfigLoader {
         try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
         try assign(&config.streamInterval, from: dict, key: "stream_interval", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: dict, key: "prefill_step_size", expected: "integer >= 1")
+        if dict["continuous_batching"] != nil {
+            guard let rawMode = rawNode?["continuous_batching"]?.scalar?.string,
+                  let mode = ContinuousBatchingMode(rawValue: rawMode.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "continuous_batching",
+                    value: String(describing: dict["continuous_batching"]),
+                    expected: "off, canary, or on"
+                )
+            }
+            config.continuousBatching = mode
+        }
+        try assign(&config.continuousBatchQueueLimit, from: dict, key: "continuous_batch_queue_limit", expected: "integer >= 1")
         return config
     }
 
@@ -478,6 +546,8 @@ public enum ConfigLoader {
         try assign(&config.managedBy, from: environment, env: "MACPROVIDER_MANAGED_BY", expected: "string")
         try assign(&config.streamInterval, from: environment, env: "MACPROVIDER_STREAM_INTERVAL", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: environment, env: "MACPROVIDER_PREFILL_STEP_SIZE", expected: "integer >= 1")
+        try assign(&config.continuousBatching, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCHING", expected: "off, canary, or on")
+        try assign(&config.continuousBatchQueueLimit, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT", expected: "integer >= 1")
         return config
     }
 
@@ -526,6 +596,12 @@ public enum ConfigLoader {
         }
         if let draftModel = cli.draftModel {
             config.draftModel = draftModel
+        }
+        if let modelArtifactSHA256 = cli.modelArtifactSHA256 {
+            config.modelArtifactSHA256 = modelArtifactSHA256
+        }
+        if let modelArtifactPath = cli.modelArtifactPath {
+            config.modelArtifactPath = modelArtifactPath
         }
         if let draftModelArtifactSHA256 = cli.draftModelArtifactSHA256 {
             config.draftModelArtifactSHA256 = draftModelArtifactSHA256
@@ -617,6 +693,19 @@ public enum ConfigLoader {
         }
         if let prefillStepSize = cli.prefillStepSize {
             config.prefillStepSize = prefillStepSize
+        }
+        if let continuousBatching = cli.continuousBatching {
+            guard let mode = ContinuousBatchingMode(rawValue: continuousBatching.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "--continuous-batching",
+                    value: continuousBatching,
+                    expected: "off, canary, or on"
+                )
+            }
+            config.continuousBatching = mode
+        }
+        if let continuousBatchQueueLimit = cli.continuousBatchQueueLimit {
+            config.continuousBatchQueueLimit = continuousBatchQueueLimit
         }
         return config
     }
@@ -841,6 +930,14 @@ public enum ConfigLoader {
             throw ConfigError.invalidValue(key: key, value: value, expected: expected)
         }
         field = format
+    }
+
+    private static func assign(_ field: inout ContinuousBatchingMode, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let mode = ContinuousBatchingMode(rawValue: value.lowercased()) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = mode
     }
 
     private static func parseBool(_ value: String) -> Bool? {

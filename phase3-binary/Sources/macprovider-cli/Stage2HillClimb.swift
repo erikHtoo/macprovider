@@ -309,7 +309,7 @@ struct Stage2HillClimb {
             model: selectedModel,
             targetContext: targetContext,
             measuredPromptTokens: measuredPromptTokens,
-            maxTokens: Stage1Prober.maxTokens,
+            maxTokens: Stage2Prober.maxTokens(for: targetContext),
             aggThroughputTPS: medianTPS,
             ttftP95MS: p95TTFTMS,
             fits: fits,
@@ -337,22 +337,34 @@ struct Stage2HillClimb {
 }
 
 struct Stage2Prober: Stage2Probing {
+    // Stage 2 deliberately uses the same context-bounded completion budget as
+    // Stage 1. Both stages send the same padded Harmony probe; retaining a
+    // 64-token Stage 2 cap would make gpt-oss-20b fail tuning after Stage 1
+    // had established that its terminal framing needs the larger allowance.
+    static func maxTokens(for targetContext: Int) -> Int {
+        Stage1Prober.maxTokens(for: targetContext)
+    }
+    static let defaultProbeIdleTimeoutSec: TimeInterval = 300
+    static let defaultProbeTotalTimeoutSec: TimeInterval = 300
     private static let stopTokens = ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"]
 
     private let session: URLSession
     private let readyTimeoutSec: TimeInterval
     private let stopGraceSeconds: Double
+    private let probeTotalTimeoutSec: TimeInterval
     private let clock: () -> Date
 
     init(
         session: URLSession = .shared,
         readyTimeoutSec: TimeInterval = 120,
         stopGraceSeconds: Double = 10,
+        probeTotalTimeoutSec: TimeInterval = Stage2Prober.defaultProbeTotalTimeoutSec,
         clock: @escaping () -> Date = Date.init
     ) {
         self.session = session
         self.readyTimeoutSec = readyTimeoutSec
         self.stopGraceSeconds = stopGraceSeconds
+        self.probeTotalTimeoutSec = max(1, probeTotalTimeoutSec)
         self.clock = clock
     }
 
@@ -395,10 +407,7 @@ struct Stage2Prober: Stage2Probing {
             maxContext: knobs.maxContext,
             maxBatch: knobs.maxBatch
         )
-        defer {
-            runner.stop(graceSeconds: stopGraceSeconds)
-        }
-
+        return try await withCandidateProviderCleanup(runner, graceSeconds: stopGraceSeconds) {
         switch try await runner.waitForReady(timeout: readyTimeoutSec) {
         case .ready:
             break
@@ -435,6 +444,19 @@ struct Stage2Prober: Stage2Probing {
                         nErr: max(1, nErr + 1),
                         measuredPromptTokens: measuredPromptTokens
                     )
+                }
+                // Reject non-finite TTFT / non-positive throughput BEFORE
+                // recording the replicate. finalizeProbeMetrics returns
+                // `(.infinity, 0)` for a stream that generated nothing (empty
+                // or zero-usage). This guard MUST run independent of
+                // `gateTTFTMS`: when `gateTTFTMS == 0` disables the TTFT
+                // ceiling below, an unguarded `(0, ∞)` replicate would be
+                // appended and yield `.feasible(medianTPS: 0, p95TTFTMS: ∞)`
+                // — an infeasible cell wrongly marked feasible.
+                guard result.throughputTPS.isFinite, result.throughputTPS > 0, result.ttftMS.isFinite else {
+                    nErr += 1
+                    firstFailure = firstFailure ?? "probe produced no measurable throughput (TPS \(result.throughputTPS), TTFT \(result.ttftMS)ms)"
+                    continue
                 }
                 // gateTTFTMS == 0 means the ceiling is disabled (#742: no 60s default).
                 if gateTTFTMS > 0, result.ttftMS > Double(gateTTFTMS) {
@@ -480,23 +502,56 @@ struct Stage2Prober: Stage2Probing {
             )
         }
 
+        // Round-2 security MEDIUM: guard the cell aggregate before declaring it
+        // feasible. Even with the per-replicate guards above, the median of
+        // enormous-but-finite per-replicate values can overflow to `.infinity`
+        // (the averaging is now overflow-safe, but this backstops any residual
+        // non-finite/non-positive aggregate). A non-finite or non-positive
+        // aggregate is an infeasible cell, never a winner.
+        let medianTPS = median(throughputs)
+        let p95TTFTMS = percentile95(ttfts)
+        guard medianTPS.isFinite, medianTPS > 0, p95TTFTMS.isFinite else {
+            return .infeasible(
+                reason: "Stage 2 aggregate produced invalid metrics (median TPS \(medianTPS), p95 TTFT \(p95TTFTMS)ms)",
+                nErr: replicateCount,
+                measuredPromptTokens: measuredPromptTokens
+            )
+        }
+
         return .feasible(
-            medianTPS: median(throughputs),
-            p95TTFTMS: percentile95(ttfts),
+            medianTPS: medianTPS,
+            p95TTFTMS: p95TTFTMS,
             measuredPromptTokens: measuredPromptTokens
         )
+        }
     }
 
     private func probeOnce(model: String, port: Int, targetContext: Int) async throws -> Stage2SingleProbeResult {
+        try await withThrowingTaskGroup(of: Stage2SingleProbeResult.self) { group in
+            group.addTask {
+                try await self.probeOnceWithoutDeadline(model: model, port: port, targetContext: targetContext)
+            }
+            group.addTask {
+                let nanoseconds = UInt64(self.probeTotalTimeoutSec * 1_000_000_000)
+                try await Task.sleep(nanoseconds: nanoseconds)
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
+    private func probeOnceWithoutDeadline(model: String, port: Int, targetContext: Int) async throws -> Stage2SingleProbeResult {
+        let maxTokens = Self.maxTokens(for: targetContext)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"
-        request.timeoutInterval = max(1, TimeInterval(Stage1Prober.maxTokens))
+        request.timeoutInterval = Self.defaultProbeIdleTimeoutSec
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": model,
             "stream": true,
             "temperature": 0,
-            "max_tokens": Stage1Prober.maxTokens,
+            "max_tokens": maxTokens,
             "messages": [
                 [
                     "role": "user",
@@ -510,6 +565,20 @@ struct Stage2Prober: Stage2Probing {
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         var generatedText = ""
         var firstTokenAt: Date?
+        // Reasoning models (gpt-oss-20b / Harmony) suppress their
+        // analysis/reasoning channel from `delta.content`, so on the
+        // probe's nonsense padded prompt they generate tokens but emit
+        // ZERO visible content deltas. The provider closes the stream with
+        // a usage chunk (`choices: []` + `usage`) that carries the honest
+        // total decode count in `macprovider_generated_completion_tokens`
+        // (all channels incl. suppressed reasoning; HTTPServer.swift
+        // `usage()`) and the warm-decode wall-time in
+        // `macprovider_generation_ms`. Track the latest reported values so
+        // finalization can derive throughput from them, not from counting
+        // visible content deltas — otherwise reasoning models measure
+        // 0 tok/s and are wrongly marked infeasible.
+        var usageDecodedTokens: Int?
+        var usageGenerationMS: Int?
 
         for try await rawLine in bytes.lines {
             guard rawLine.hasPrefix("data:") else {
@@ -518,6 +587,12 @@ struct Stage2Prober: Stage2Probing {
             let payload = rawLine.dropFirst(5).trimmingCharacters(in: .whitespacesAndNewlines)
             if payload == "[DONE]" {
                 break
+            }
+            if let usage = Stage1Prober.usageDecodedTokens(from: payload, maxTokens: maxTokens) {
+                usageDecodedTokens = usage
+            }
+            if let generationMS = Stage1Prober.usageGenerationMS(from: payload) {
+                usageGenerationMS = generationMS
             }
             guard let content = Self.contentDelta(from: payload), !content.isEmpty else {
                 continue
@@ -528,23 +603,25 @@ struct Stage2Prober: Stage2Probing {
             generatedText += content
         }
 
-        guard let firstTokenAt else {
-            return Stage2SingleProbeResult(
-                statusCode: statusCode,
-                ttftMS: .infinity,
-                generatedText: generatedText,
-                throughputTPS: 0
-            )
-        }
-
         let ended = clock()
-        let outputTokens = max(1, generatedText.split(whereSeparator: \.isWhitespace).count)
-        let elapsed = max(0.001, ended.timeIntervalSince(started))
+        // Share Stage 1's finalization so both stages agree on decode
+        // throughput and the reasoning-model fallback. Stage 2 preserves its
+        // historical content-fallback numerator (word count of the visible
+        // text) for older serve builds without the vendor timing field.
+        let contentWordCount = generatedText.split(whereSeparator: \.isWhitespace).count
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: contentWordCount,
+            usageDecodedTokens: usageDecodedTokens,
+            usageGenerationMS: usageGenerationMS,
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
         return Stage2SingleProbeResult(
             statusCode: statusCode,
-            ttftMS: max(0, firstTokenAt.timeIntervalSince(started) * 1_000),
+            ttftMS: metrics.ttftMS,
             generatedText: generatedText,
-            throughputTPS: Double(outputTokens) / elapsed
+            throughputTPS: metrics.throughputTPS
         )
     }
 
@@ -568,19 +645,32 @@ struct Stage2Prober: Stage2Probing {
     }
 
     private func percentile95(_ values: [Double]) -> Double {
+        Stage2Prober.percentile95(values)
+    }
+
+    static func percentile95(_ values: [Double]) -> Double {
         let sorted = values.sorted()
         let index = max(0, min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1))
         return sorted[index]
     }
 
     private func median(_ values: [Double]) -> Double {
+        Stage2Prober.median(values)
+    }
+
+    /// Overflow-safe median. Internal (not private) so the round-2 security
+    /// MEDIUM overflow guard is directly unit-testable.
+    static func median(_ values: [Double]) -> Double {
         guard !values.isEmpty else {
             return 0
         }
         let sorted = values.sorted()
         let mid = sorted.count / 2
         if sorted.count.isMultiple(of: 2) {
-            return (sorted[mid - 1] + sorted[mid]) / 2
+            // Round-2 security MEDIUM: average as `a/2 + b/2` rather than
+            // `(a + b) / 2` so two enormous-but-finite middle values do not
+            // overflow to `.infinity` before the aggregate guard runs.
+            return sorted[mid - 1] / 2 + sorted[mid] / 2
         }
         return sorted[mid]
     }

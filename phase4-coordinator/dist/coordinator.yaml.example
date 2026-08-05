@@ -373,7 +373,7 @@ malibu_emission:
 # routing. Keys match model_id case-insensitively; values must be bare
 # numeric versions or the coordinator refuses to start.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.67"
+  latest_binary_version: "1.8.81"
   # required_binary_version: "1.7.0"
   # per_model_required_binary_version:
   #   "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": "1.8.60"
@@ -444,8 +444,10 @@ payout:
     # §6.3 wallet path. Encrypted on disk; KEK supplied via systemd
     # LoadCredential=payout-wallet-kek (preferred) or
     # MACPROVIDER_PAYOUT_WALLET_KEK env var.
-    encrypted_wallet_path: "/etc/macprovider/payout-wallet.enc"
-    encrypted_wallet_on_disk_hex: false
+    # The payout-wallet-encrypt tool (cmd/payout-wallet-encrypt) writes
+    # HEX, so encrypted_wallet_on_disk_hex MUST be true for its output.
+    encrypted_wallet_path: "/etc/macprovider/payout-wallet.hex"
+    encrypted_wallet_on_disk_hex: true
 
     # NEVER enable in production. Dev path requires explicit opt-in
     # AND MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY env var.

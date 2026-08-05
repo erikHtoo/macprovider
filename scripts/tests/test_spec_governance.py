@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -12,11 +13,225 @@ from scripts.check_spec_governance import validate_repository
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "spec_governance"
+JOURNEY_RESULT_SIGNING_DOMAIN = b"macprovider.journey-result.v1\n"
 GAP = {
     "verdict": "UNKNOWN",
     "owner": "@owner",
     "issue": "https://github.com/Augustas11/macprovider/issues/614",
 }
+SPEC016_PAYOUT_JOURNEY_ID = "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
+SPEC016_PAYOUT_RUN_ID = "spec016-r002-payout-address-20260101T000000Z"
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def signed_journey_envelope(
+    commit: str,
+    *,
+    requirement_ids: list[str] | None = None,
+    journey_id: str = "JOURNEY-BOOT",
+    result_status: str = "pass",
+    step_status: str = "pass",
+    artifacts: list[str] | None = None,
+    artifact_records: list[dict[str, str]] | None = None,
+    captured_at: str = "2026-01-01T00:00:00Z",
+    signed_sha256: str | None = None,
+    signatures: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    signed = {
+        "schema_version": "macprovider.journey-result.v1",
+        "journey_id": journey_id,
+        "requirement_ids": requirement_ids or ["SPEC-001-R001"],
+        "repository": {
+            "name": "Augustas11/macprovider",
+            "commit": commit,
+        },
+        "captured_at": captured_at,
+        "expires_at": "2027-01-01",
+        "operator": {
+            "role": "fixture-operator",
+            "identity_fingerprint": "a" * 64,
+        },
+        "environment": {
+            "class": "fixture-physical-provider",
+            "hardware_profile": "fixture-apple-silicon",
+            "candidate": "fixture-candidate",
+        },
+        "artifacts": artifact_records or [
+            {
+                "id": "proof",
+                "sha256": hashlib.sha256(b"proof\n").hexdigest(),
+                "source": "journeys/evidence/proof.txt",
+            }
+        ],
+        "result": {
+            "status": result_status,
+            "summary": "fixture journey passed",
+        },
+        "steps": [
+            {
+                "id": "step-1",
+                "status": step_status,
+                "assertion": "fixture assertion",
+                "artifacts": ["proof"] if artifacts is None else artifacts,
+            }
+        ],
+        "redaction": {
+            "secrets_redacted": True,
+            "operator_identity_redacted": True,
+            "local_account_names_redacted": True,
+        },
+    }
+    digest = hashlib.sha256(canonical_json_bytes(signed)).hexdigest()
+    envelope_signatures = signatures
+    if envelope_signatures is None:
+        envelope_signatures = [
+            {
+                "algorithm": "ecdsa-p256-sha256",
+                "key_id": "macprovider-acceptance-p256-v1",
+                "signature": "unsigned-fixture",
+                "signed_sha256": signed_sha256 or digest,
+                "verified_at": "2026-01-01T00:00:01Z",
+                "verifier": "fixture-verifier",
+            }
+        ]
+    return {
+        "schema_version": "macprovider.journey-result-envelope.v1",
+        "signatures": envelope_signatures,
+        "signed": signed,
+    }
+
+
+def spec016_payout_signed_envelope(commit: str, artifact_record: dict[str, str]) -> dict[str, object]:
+    envelope = signed_journey_envelope(
+        commit,
+        requirement_ids=["SPEC-016-R002"],
+        journey_id=SPEC016_PAYOUT_JOURNEY_ID,
+        artifact_records=[artifact_record],
+        artifacts=[artifact_record["id"]],
+    )
+    signed = envelope["signed"]
+    assert isinstance(signed, dict)
+    signed.update({
+        "spec_id": "SPEC-016",
+        "run_id": SPEC016_PAYOUT_RUN_ID,
+        "execution_mode": "candidate-derived-handler-only-conformance-harness",
+        "harness": {
+            "id": "phase4-coordinator/internal/payout:TestPayoutAddressRegistrationJourneyEvidence",
+            "version": "v1",
+            "execution_mode": "candidate-derived-handler-only-conformance-harness",
+            "isolated_sqlite": True,
+            "real_provider_token_check": True,
+            "real_pause_validation": True,
+            "controlled_dependencies": True,
+            "production_runner_built": False,
+            "external_rpc_client_built": False,
+            "settlement_signer_built": False,
+            "release_promotion_attempted": False,
+        },
+        "config_before": {
+            "payout_enabled": False,
+            "runner_started": False,
+            "external_rpc_started": False,
+            "settlement_signer_started": False,
+        },
+        "config_after": {
+            "payout_enabled": False,
+            "runner_started": False,
+            "external_rpc_started": False,
+            "settlement_signer_started": False,
+            "settlement_attempted": False,
+            "production_side_effects": False,
+        },
+        "restoration": {"result": "isolated SQLite tempdir removed by test cleanup"},
+        "observations": {
+            "provider_id_sha256": "b" * 64,
+            "hot_wallet_sha256": "c" * 64,
+            "first_address_sha256": "d" * 64,
+            "eip712_digest_sha256": "e" * 64,
+            "raw_signature_redacted": True,
+            "provider_token_redacted": True,
+            "private_keys_redacted": True,
+        },
+        "eip712": {
+            "typed_data_artifact_sha256": "1" * 64,
+            "digest_sha256": "2" * 64,
+            "signer_address_sha256": "3" * 64,
+            "verifier": "fixture-eip712-verifier",
+            "verification_result": "pass",
+            "raw_signature_access_controlled": True,
+        },
+        "candidate": {
+            "addresses_go_sha256": "4" * 64,
+            "eip712_go_sha256": "5" * 64,
+            "attempts_go_sha256": "6" * 64,
+            "payout_address_client_sha256": "7" * 64,
+            "payout_wallet_flow_sha256": "8" * 64,
+            "payout_signer_resource_sha256": "9" * 64,
+        },
+        "signer": {
+            "key_id": "macprovider-acceptance-p256-v1",
+            "identity_fingerprint": "a" * 64,
+            "trust_root_sha256": "f" * 64,
+            "verification_result": "pass",
+        },
+        "steps": [
+            {
+                "id": f"step-{index:02d}",
+                "status": "pass",
+                "assertion": f"fixture SPEC-016 payout assertion {index:02d}",
+                "artifacts": [artifact_record["id"]],
+            }
+            for index in range(1, 12)
+        ],
+    })
+    envelope["signatures"][0]["signed_sha256"] = hashlib.sha256(canonical_json_bytes(signed)).hexdigest()
+    return envelope
+
+
+def sign_journey_envelope(root: Path, envelope: dict[str, object], *, corrupt_signature: bool = False) -> None:
+    security = root / "security"
+    security.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+        private_key = work / "private.pem"
+        public_key = security / "acceptance-candidate-signing-public.pem"
+        message = work / "message"
+        signature = work / "signature.der"
+        subprocess.run(
+            ["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(private_key)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["openssl", "ec", "-in", str(private_key), "-pubout", "-out", str(public_key)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        message.write_bytes(JOURNEY_RESULT_SIGNING_DOMAIN + canonical_json_bytes(envelope["signed"]))
+        subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", str(private_key), "-out", str(signature), str(message)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        signature_bytes = bytearray(signature.read_bytes())
+        if corrupt_signature:
+            signature_bytes[-1] ^= 0x01
+        encoded = base64.b64encode(bytes(signature_bytes)).decode("ascii")
+    envelope["signatures"][0]["signature"] = encoded
+
+
+def validate_repository_with_fixture_key(root: Path) -> list[str]:
+    public_key = root / "security" / "acceptance-candidate-signing-public.pem"
+    if not public_key.exists():
+        return validate_repository(root).errors
+    trusted_hash = hashlib.sha256(public_key.read_bytes()).hexdigest()
+    return validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors
 
 
 def base_repository() -> dict[str, object]:
@@ -33,6 +248,17 @@ def base_repository() -> dict[str, object]:
             }),
             "schemas/spec-conformance-v1.schema.json": json.dumps({
                 "$id": "https://github.com/Augustas11/macprovider/schemas/spec-conformance-v1.schema.json"
+            }),
+            "schemas/journey-result-v1.schema.json": json.dumps({
+                "$id": "https://github.com/Augustas11/macprovider/schemas/journey-result-v1.schema.json",
+                "$defs": {
+                    "signature": {
+                        "properties": {
+                            "algorithm": {"const": "ecdsa-p256-sha256"},
+                            "key_id": {"const": "macprovider-acceptance-p256-v1"},
+                        }
+                    }
+                },
             }),
             "schemas/spec-pr-governance-v1.schema.json": json.dumps({
                 "$id": "https://github.com/Augustas11/macprovider/schemas/spec-pr-governance-v1.schema.json"
@@ -190,6 +416,172 @@ def apply_post_write_mutation(root: Path, repository: dict[str, object]) -> None
                 "expires_at": "2027-01-01",
             },
         ]
+    elif operation in {
+        "valid_signed_journey_result",
+        "signed_journey_result_missing_signature",
+        "signed_journey_result_hash_mismatch",
+        "signed_journey_result_failed_step",
+        "signed_journey_result_wrong_requirement",
+        "signed_journey_result_empty_artifacts",
+        "signed_journey_result_future_capture",
+        "signed_journey_result_bad_signature",
+        "signed_journey_result_commit_mismatch",
+        "signed_journey_result_mixed_physical_evidence",
+        "production_physically_verified_with_pending_requirement",
+        "valid_spec016_payout_signed_journey_result",
+        "spec016_payout_signed_journey_result_missing_contract_fields",
+        "spec016_payout_signed_journey_result_candidate_artifact",
+        "spec016_payout_signed_journey_result_wrong_journey",
+        "spec016_payout_signed_journey_result_duplicate_step",
+        "spec016_payout_signed_journey_result_extra_secret_field",
+    }:
+        if operation == "signed_journey_result_missing_signature":
+            envelope = signed_journey_envelope(commit, signatures=[])
+        elif operation == "signed_journey_result_hash_mismatch":
+            envelope = signed_journey_envelope(commit, signed_sha256="0" * 64)
+        elif operation == "signed_journey_result_failed_step":
+            envelope = signed_journey_envelope(commit, step_status="fail")
+        elif operation == "signed_journey_result_wrong_requirement":
+            envelope = signed_journey_envelope(commit, requirement_ids=["SPEC-001-R999"])
+        elif operation == "signed_journey_result_empty_artifacts":
+            envelope = signed_journey_envelope(commit, artifacts=[])
+        elif operation == "signed_journey_result_future_capture":
+            envelope = signed_journey_envelope(commit, captured_at="2099-01-01T00:00:00Z")
+        elif operation == "signed_journey_result_bad_signature":
+            envelope = signed_journey_envelope(commit)
+        elif operation == "signed_journey_result_commit_mismatch":
+            older_commit = commit
+            (root / "src" / "example.py").write_text("def example():\n    return True\n\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "new implementation evidence"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            envelope = signed_journey_envelope(older_commit)
+        elif operation == "production_physically_verified_with_pending_requirement":
+            conformance["requirements"].append({
+                "requirement_id": "SPEC-001-R002",
+                "spec_id": "SPEC-001",
+                "state": "pending",
+                "implementation": ["src/example.py:example"],
+                "tests": ["tests/test_example.py::test_example"],
+                "journeys": [],
+                "evidence": [],
+                "gap": copy.deepcopy(GAP),
+            })
+            conformance["specs"][0]["production_status"] = "physically-verified"
+            envelope = signed_journey_envelope(commit)
+        elif operation in {
+            "valid_spec016_payout_signed_journey_result",
+            "spec016_payout_signed_journey_result_missing_contract_fields",
+            "spec016_payout_signed_journey_result_candidate_artifact",
+            "spec016_payout_signed_journey_result_wrong_journey",
+            "spec016_payout_signed_journey_result_duplicate_step",
+            "spec016_payout_signed_journey_result_extra_secret_field",
+        }:
+            redacted_path = root / "journeys" / "evidence" / "spec016-payout-redacted.json"
+            redacted_path.write_text(
+                json.dumps({
+                    "schema_version": "macprovider.payout-address-journey-evidence.v1",
+                    "journey_id": SPEC016_PAYOUT_JOURNEY_ID,
+                    "run_id": SPEC016_PAYOUT_RUN_ID,
+                    "redacted": True,
+                }, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            artifact_record = {
+                "id": "redacted-payout-address-journey",
+                "sha256": hashlib.sha256(redacted_path.read_bytes()).hexdigest(),
+                "source": "journeys/evidence/spec016-payout-redacted.json",
+            }
+            if operation == "spec016_payout_signed_journey_result_candidate_artifact":
+                candidate_path = root / "journeys" / "evidence" / "spec016-payout.candidate.json"
+                candidate_path.write_text(
+                    json.dumps({
+                        "schema_version": "macprovider.journey-result-candidate.v1",
+                        "journey_id": SPEC016_PAYOUT_JOURNEY_ID,
+                        "run_id": SPEC016_PAYOUT_RUN_ID,
+                        "promotion_ready": False,
+                    }, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                artifact_record = {
+                    "id": "redacted-payout-address-journey",
+                    "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+                    "source": "journeys/evidence/spec016-payout.candidate.json",
+                }
+            if operation == "spec016_payout_signed_journey_result_wrong_journey":
+                envelope = signed_journey_envelope(
+                    commit,
+                    requirement_ids=["SPEC-016-R002"],
+                    journey_id="JOURNEY-BOOT",
+                    artifact_records=[artifact_record],
+                    artifacts=[artifact_record["id"]],
+                )
+            elif operation == "spec016_payout_signed_journey_result_missing_contract_fields":
+                envelope = signed_journey_envelope(
+                    commit,
+                    requirement_ids=["SPEC-016-R002"],
+                    journey_id=SPEC016_PAYOUT_JOURNEY_ID,
+                    artifact_records=[artifact_record],
+                    artifacts=[artifact_record["id"]],
+                )
+            else:
+                envelope = spec016_payout_signed_envelope(commit, artifact_record)
+                if operation == "spec016_payout_signed_journey_result_duplicate_step":
+                    signed = envelope["signed"]
+                    assert isinstance(signed, dict)
+                    steps = signed["steps"]
+                    assert isinstance(steps, list)
+                    steps.append(copy.deepcopy(steps[0]))
+                    envelope["signatures"][0]["signed_sha256"] = hashlib.sha256(canonical_json_bytes(signed)).hexdigest()
+                elif operation == "spec016_payout_signed_journey_result_extra_secret_field":
+                    signed = envelope["signed"]
+                    assert isinstance(signed, dict)
+                    observations = signed["observations"]
+                    assert isinstance(observations, dict)
+                    observations["provider_token_raw"] = "secret-token-would-leak"
+                    envelope["signatures"][0]["signed_sha256"] = hashlib.sha256(canonical_json_bytes(signed)).hexdigest()
+        else:
+            envelope = signed_journey_envelope(commit)
+        if envelope["signatures"]:
+            sign_journey_envelope(root, envelope, corrupt_signature=operation == "signed_journey_result_bad_signature")
+        evidence_path = root / "journeys" / "evidence" / "signed-result.json"
+        evidence_path.write_text(json.dumps(envelope, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        if operation in {
+            "valid_spec016_payout_signed_journey_result",
+            "spec016_payout_signed_journey_result_missing_contract_fields",
+            "spec016_payout_signed_journey_result_candidate_artifact",
+            "spec016_payout_signed_journey_result_wrong_journey",
+            "spec016_payout_signed_journey_result_duplicate_step",
+            "spec016_payout_signed_journey_result_extra_secret_field",
+        }:
+            requirement["journeys"] = [SPEC016_PAYOUT_JOURNEY_ID]
+            if operation == "spec016_payout_signed_journey_result_wrong_journey":
+                requirement["journeys"] = ["JOURNEY-BOOT"]
+        else:
+            requirement["journeys"] = ["JOURNEY-BOOT"]
+        requirement["evidence"] = [
+            {
+                "artifact": f"commit:{commit}",
+                "source": None,
+                "captured_at": "2026-01-01",
+                "expires_at": "2027-01-01",
+            },
+            {
+                "artifact": f"sha256:{digest}",
+                "source": "journeys/evidence/signed-result.json",
+                "captured_at": "2026-01-01",
+                "expires_at": "2027-01-01",
+            },
+        ]
+        if operation == "signed_journey_result_mixed_physical_evidence":
+            proof_digest = hashlib.sha256((root / "journeys" / "evidence" / "proof.txt").read_bytes()).hexdigest()
+            requirement["evidence"].append({
+                "artifact": f"sha256:{proof_digest}",
+                "source": "journeys/evidence/proof.txt",
+                "captured_at": "2026-01-01",
+                "expires_at": "2027-01-01",
+            })
     else:
         raise AssertionError(f"unknown post-write fixture operation {operation!r}")
 
@@ -240,6 +632,8 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         specs[0]["status"] = "physically-verified"
     elif operation == "production_physically_verified_without_signed_result":
         specs[0]["production_status"] = "physically-verified"
+    elif operation == "production_physically_verified_without_requirements":
+        specs[1]["production_status"] = "physically-verified"
     elif operation == "stale_evidence":
         digest = hashlib.sha256(b"proof\n").hexdigest()
         requirements[0]["state"] = "conformant"
@@ -279,6 +673,57 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         repository["_post_write_operation"] = "stale_commit_evidence"
     elif operation == "sensitive_conformant_without_signed_result":
         repository["_post_write_operation"] = "sensitive_conformant_without_signed_result"
+    elif operation == "valid_signed_journey_result":
+        repository["_post_write_operation"] = "valid_signed_journey_result"
+    elif operation in {
+        "valid_spec016_payout_signed_journey_result",
+        "spec016_payout_signed_journey_result_missing_contract_fields",
+        "spec016_payout_signed_journey_result_candidate_artifact",
+        "spec016_payout_signed_journey_result_wrong_journey",
+        "spec016_payout_signed_journey_result_duplicate_step",
+        "spec016_payout_signed_journey_result_extra_secret_field",
+    }:
+        repository["files"]["specs/SPEC-016-payout-pipeline.md"] = "# SPEC-016 - Payout Pipeline\n\n**Version:** 0.1.0\n\nHuman contract text.\n"
+        repository["files"][f"journeys/{SPEC016_PAYOUT_JOURNEY_ID}.md"] = f"# {SPEC016_PAYOUT_JOURNEY_ID}\n"
+        del repository["files"]["specs/SPEC-001-one.md"]
+        authority["domains"][0].update({
+            "id": "payout-lifecycle",
+            "owner_spec": "SPEC-016",
+            "consumers": [],
+        })
+        specs[0].update({
+            "spec_id": "SPEC-016",
+            "title": "Payout Pipeline",
+            "path": "specs/SPEC-016-payout-pipeline.md",
+            "authority_domains": ["payout-lifecycle"],
+            "depends_on": [],
+        })
+        requirements[0].update({
+            "requirement_id": "SPEC-016-R002",
+            "spec_id": "SPEC-016",
+            "journeys": [SPEC016_PAYOUT_JOURNEY_ID],
+        })
+        repository["_post_write_operation"] = operation
+    elif operation == "signed_journey_result_missing_signature":
+        repository["_post_write_operation"] = "signed_journey_result_missing_signature"
+    elif operation == "signed_journey_result_hash_mismatch":
+        repository["_post_write_operation"] = "signed_journey_result_hash_mismatch"
+    elif operation == "signed_journey_result_failed_step":
+        repository["_post_write_operation"] = "signed_journey_result_failed_step"
+    elif operation == "signed_journey_result_wrong_requirement":
+        repository["_post_write_operation"] = "signed_journey_result_wrong_requirement"
+    elif operation == "signed_journey_result_empty_artifacts":
+        repository["_post_write_operation"] = "signed_journey_result_empty_artifacts"
+    elif operation == "signed_journey_result_future_capture":
+        repository["_post_write_operation"] = "signed_journey_result_future_capture"
+    elif operation == "signed_journey_result_bad_signature":
+        repository["_post_write_operation"] = "signed_journey_result_bad_signature"
+    elif operation == "signed_journey_result_commit_mismatch":
+        repository["_post_write_operation"] = "signed_journey_result_commit_mismatch"
+    elif operation == "signed_journey_result_mixed_physical_evidence":
+        repository["_post_write_operation"] = "signed_journey_result_mixed_physical_evidence"
+    elif operation == "production_physically_verified_with_pending_requirement":
+        repository["_post_write_operation"] = "production_physically_verified_with_pending_requirement"
     elif operation == "mismatched_spec_header_id":
         repository["files"]["specs/SPEC-001-one.md"] = (
             "# SPEC-999 - One\n\n**Version:** 0.1.0\n\nHuman contract text.\n"
@@ -330,6 +775,43 @@ class GovernanceValidatorTests(unittest.TestCase):
             write_repository(root, base_repository())
             self.assertEqual([], validate_repository(root).errors)
 
+    def test_sensitive_conformant_with_signed_journey_result_passes(self) -> None:
+        repository = base_repository()
+        apply_mutation(repository, {"operation": "valid_signed_journey_result"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            apply_post_write_mutation(root, repository)
+            self.assertEqual([], validate_repository_with_fixture_key(root))
+
+    def test_signed_journey_result_can_coexist_with_other_physical_evidence(self) -> None:
+        repository = base_repository()
+        apply_mutation(repository, {"operation": "signed_journey_result_mixed_physical_evidence"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            apply_post_write_mutation(root, repository)
+            self.assertEqual([], validate_repository_with_fixture_key(root))
+
+    def test_spec016_payout_signed_journey_result_passes_when_contract_complete(self) -> None:
+        repository = base_repository()
+        apply_mutation(repository, {"operation": "valid_spec016_payout_signed_journey_result"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            apply_post_write_mutation(root, repository)
+            self.assertEqual([], validate_repository_with_fixture_key(root))
+
+    def test_signed_journey_result_rejects_unpinned_public_key(self) -> None:
+        repository = base_repository()
+        apply_mutation(repository, {"operation": "valid_signed_journey_result"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            apply_post_write_mutation(root, repository)
+            errors = "\n".join(validate_repository(root).errors)
+            self.assertIn("trusted public key does not match pinned journey-result trust anchor", errors)
+
     def test_real_spec_corpus_passes(self) -> None:
         root = Path(__file__).resolve().parents[2]
         self.assertEqual([], validate_repository(root).errors)
@@ -344,7 +826,7 @@ class GovernanceValidatorTests(unittest.TestCase):
                     root = Path(directory)
                     write_repository(root, repository)
                     apply_post_write_mutation(root, repository)
-                    errors = validate_repository(root).errors
+                    errors = validate_repository_with_fixture_key(root)
                 self.assertIn(payload["expected"], "\n".join(errors))
 
     def test_duplicate_json_object_keys_are_rejected(self) -> None:

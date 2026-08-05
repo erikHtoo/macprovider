@@ -10,19 +10,67 @@ meaning from rendered prose.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 AUTHORITY_SCHEMA_PATH = "../schemas/spec-authority-v1.schema.json"
 CONFORMANCE_SCHEMA_PATH = "../schemas/spec-conformance-v1.schema.json"
+JOURNEY_RESULT_SCHEMA_ID = "https://github.com/Augustas11/macprovider/schemas/journey-result-v1.schema.json"
+JOURNEY_RESULT_ENVELOPE_SCHEMA = "macprovider.journey-result-envelope.v1"
+JOURNEY_RESULT_PAYLOAD_SCHEMA = "macprovider.journey-result.v1"
+JOURNEY_RESULT_SIGNING_ALGORITHM = "ecdsa-p256-sha256"
+JOURNEY_RESULT_SIGNING_KEY_ID = "macprovider-acceptance-p256-v1"
+JOURNEY_RESULT_SIGNING_DOMAIN = b"macprovider.journey-result.v1\n"
+JOURNEY_RESULT_PUBLIC_KEY_PATH = "security/acceptance-candidate-signing-public.pem"
+JOURNEY_RESULT_PUBLIC_KEY_SHA256 = "849e9c9bc53db1fb8e28d3b46ab431089b12cb50b398c5317ced682d39bdbd38"
+SPEC016_PAYOUT_JOURNEY_ID = "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
+SPEC016_PAYOUT_SPEC_ID = "SPEC-016"
+SPEC016_PAYOUT_REQUIREMENT_ID = "SPEC-016-R002"
+SPEC016_PAYOUT_EXECUTION_MODE = "candidate-derived-handler-only-conformance-harness"
+SPEC016_PAYOUT_STEP_IDS = {f"step-{index:02d}" for index in range(1, 12)}
+PROVIDER_PREBETA_JOURNEY_ID = "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+PROVIDER_PREBETA_EXECUTION_MODE = "physical-provider-prebeta-admission"
+PROVIDER_PREBETA_ARTIFACT_ID = "redacted-provider-prebeta-admission"
+PROVIDER_PREBETA_EVIDENCE_SCHEMA = "macprovider.provider-prebeta-admission-evidence.v1"
+PROVIDER_PREBETA_STEP_IDS = {
+    "step-01-private-prebeta-authorization",
+    "step-02-install-launch-identity",
+    "step-03-provider-registration-admission",
+    "step-04-catalog-autotune-readiness",
+    "step-05-hardware-evidence-verifier",
+    "step-06-provider-runtime-routing",
+    "step-07-buyer-serving-smoke",
+    "step-08-redaction-and-correlation",
+}
+TRUSTED_OPENSSL_CANDIDATES = (
+    "/usr/bin/openssl",
+    "/opt/homebrew/opt/openssl@3/bin/openssl",
+    "/opt/homebrew/bin/openssl",
+    "/usr/local/bin/openssl",
+)
+
+
+def _trusted_openssl_paths() -> set[Path]:
+    trusted: set[Path] = set()
+    for candidate in TRUSTED_OPENSSL_CANDIDATES:
+        try:
+            resolved = Path(candidate).resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            trusted.add(resolved)
+    return trusted
 SPEC_ID_RE = re.compile(r"^SPEC-\d{3}$")
 SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[a-z0-9-]+\.md$")
 REQUIREMENT_ID_RE = re.compile(r"^(SPEC-\d{3})-R\d{3}$")
@@ -32,7 +80,9 @@ ISSUE_RE = re.compile(r"^https://github\.com/Augustas11/macprovider/issues/\d+$"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ARTIFACT_RE = re.compile(r"^(?:commit:[0-9a-f]{40}|sha256:[0-9a-f]{64})$")
 SHA256_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 JOURNEY_RE = re.compile(r"^JOURNEY-[A-Z0-9]+(?:-[A-Z0-9]+)*$")
+DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 TITLE_RE = re.compile(r"^#\s+(SPEC-\d{3})\s*[—–:-]\s*(.+)$")
 VERSION_RE = re.compile(r"^Version\s*:\s*(\S+)", re.IGNORECASE)
 STATUS_VERSION_RE = re.compile(r"^Status\b.*?\b(v?\d+\.\d+(?:\.\d+)?)", re.IGNORECASE)
@@ -119,6 +169,32 @@ def _load_json(path: Path, result: ValidationResult) -> Any | None:
     return None
 
 
+def resolve_trusted_openssl(path: str | None = None) -> str:
+    trusted_paths = _trusted_openssl_paths()
+    if path:
+        openssl = Path(path)
+        if not openssl.is_absolute():
+            raise ValueError("OpenSSL path must be absolute")
+        try:
+            resolved = openssl.resolve(strict=True)
+        except OSError:
+            raise ValueError(f"OpenSSL binary is absent or unsafe: {openssl}")
+        if resolved not in trusted_paths:
+            raise ValueError("OpenSSL path is not in the trusted allowlist")
+        return str(resolved)
+
+    candidates = list(TRUSTED_OPENSSL_CANDIDATES)
+    for value in candidates:
+        openssl = Path(value)
+        try:
+            resolved = openssl.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return str(resolved)
+    raise ValueError("could not resolve trusted OpenSSL binary")
+
+
 def _expect_object(value: Any, location: str, result: ValidationResult) -> bool:
     if isinstance(value, dict):
         return True
@@ -147,6 +223,13 @@ def _string(value: Any, pattern: re.Pattern[str] | None, location: str, result: 
         result.error(location, f"invalid value {value!r}")
         return None
     return value
+
+
+def _bool_value(value: Any, location: str, result: ValidationResult) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    result.error(location, "must be a boolean")
+    return None
 
 
 def _nullable_string(value: Any, pattern: re.Pattern[str], location: str, result: ValidationResult) -> str | None:
@@ -181,6 +264,16 @@ def _date(value: Any, location: str, result: ValidationResult) -> date | None:
     except ValueError:
         result.error(location, f"invalid ISO date {value!r}")
         return None
+
+
+def _datetime_z(value: Any, location: str, result: ValidationResult) -> datetime | None:
+    if not isinstance(value, str) or not DATETIME_Z_RE.fullmatch(value):
+        result.error(location, "must be an ISO UTC timestamp like 2026-08-04T12:34:56Z")
+        return None
+    parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    if parsed > datetime.now(timezone.utc):
+        result.error(location, f"timestamp is in the future: {value}")
+    return parsed
 
 
 def _validate_baseline(value: Any, location: str, result: ValidationResult) -> None:
@@ -311,6 +404,689 @@ def _source_under_journey_evidence(root: Path, source: str) -> bool:
     return True
 
 
+def _canonical_json_sha256(value: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _reachable_commit(root: Path, commit: str) -> bool:
+    return subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+        cwd=root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def _looks_like_signed_journey_result(root: Path, source: str) -> bool:
+    path = _repository_path(root, source, source, ValidationResult())
+    if path is None:
+        return False
+    probe = _load_json(path, ValidationResult())
+    return isinstance(probe, dict) and probe.get("schema_version") == JOURNEY_RESULT_ENVELOPE_SCHEMA
+
+
+def _verify_journey_result_signature(
+    root: Path,
+    signed: dict[str, Any],
+    signature: dict[str, Any],
+    trusted_public_key_sha256: str,
+    openssl_bin: str,
+    location: str,
+    result: ValidationResult,
+) -> bool:
+    if signature.get("algorithm") != JOURNEY_RESULT_SIGNING_ALGORITHM:
+        result.error(f"{location}.algorithm", f"must equal {JOURNEY_RESULT_SIGNING_ALGORITHM!r}")
+    if signature.get("key_id") != JOURNEY_RESULT_SIGNING_KEY_ID:
+        result.error(f"{location}.key_id", f"must equal {JOURNEY_RESULT_SIGNING_KEY_ID!r}")
+    encoded = signature.get("signature")
+    if not isinstance(encoded, str) or not encoded:
+        result.error(f"{location}.signature", "must be a non-empty base64 DER ECDSA signature")
+        return False
+    try:
+        signature_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        result.error(f"{location}.signature", f"invalid base64: {exc}")
+        return False
+    if base64.b64encode(signature_bytes).decode("ascii") != encoded:
+        result.error(f"{location}.signature", "must use canonical base64 encoding")
+        return False
+    if not 64 <= len(signature_bytes) <= 80:
+        result.error(f"{location}.signature", "invalid P-256 DER signature length")
+        return False
+    public_key = root / JOURNEY_RESULT_PUBLIC_KEY_PATH
+    if not public_key.exists():
+        result.error(location, f"trusted public key missing: {JOURNEY_RESULT_PUBLIC_KEY_PATH}")
+        return False
+    try:
+        public_key_bytes = public_key.read_bytes()
+    except OSError as exc:
+        result.error(location, f"cannot read trusted public key: {exc}")
+        return False
+    public_key_sha256 = hashlib.sha256(public_key_bytes).hexdigest()
+    if public_key_sha256 != trusted_public_key_sha256:
+        result.error(location, "trusted public key does not match pinned journey-result trust anchor")
+        return False
+    with tempfile.TemporaryDirectory(prefix="journey-result-verify.") as directory:
+        tmp = Path(directory)
+        message = tmp / "message"
+        signature_path = tmp / "signature.der"
+        message.write_bytes(JOURNEY_RESULT_SIGNING_DOMAIN + _canonical_json_bytes(signed))
+        signature_path.write_bytes(signature_bytes)
+        completed = subprocess.run(
+            [
+                openssl_bin,
+                "dgst",
+                "-sha256",
+                "-verify",
+                str(public_key),
+                "-signature",
+                str(signature_path),
+                str(message),
+            ],
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+            timeout=20,
+        )
+    if completed.returncode != 0:
+        result.error(f"{location}.signature", "cryptographic verification failed")
+        return False
+    return True
+
+
+def _require_false(mapping: dict[str, Any], field: str, location: str, result: ValidationResult) -> None:
+    value = _bool_value(mapping.get(field), f"{location}.{field}", result)
+    if value is not None and value is not False:
+        result.error(f"{location}.{field}", "must be false for SPEC-016 contract-only payout evidence")
+
+
+def _require_sha_field(mapping: dict[str, Any], field: str, location: str, result: ValidationResult) -> None:
+    _string(mapping.get(field), SHA256_HEX_RE, f"{location}.{field}", result)
+
+
+def _validate_spec016_payout_artifact(root: Path, artifact: dict[str, Any], location: str, result: ValidationResult) -> None:
+    source = artifact.get("source")
+    if not isinstance(source, str):
+        return
+    if source.endswith(".candidate.json"):
+        result.error(f"{location}.source", "SPEC-016 payout journey-result cannot promote candidate-only artifact files")
+        return
+    artifact_path = _repository_path(root, source, f"{location}.source", result)
+    if artifact_path is None:
+        return
+    payload = _load_json(artifact_path, ValidationResult())
+    if not isinstance(payload, dict):
+        return
+    if payload.get("schema_version") == "macprovider.journey-result-candidate.v1" or payload.get("promotion_ready") is False:
+        result.error(f"{location}.source", "SPEC-016 payout journey-result cannot promote candidate-only artifact content")
+
+
+def _validate_provider_prebeta_artifact(
+    root: Path,
+    artifact: dict[str, Any],
+    signed: dict[str, Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if artifact.get("id") != PROVIDER_PREBETA_ARTIFACT_ID:
+        result.error(f"{location}.id", f"must equal {PROVIDER_PREBETA_ARTIFACT_ID!r}")
+    source = artifact.get("source")
+    if not isinstance(source, str):
+        return
+    if not source.startswith("journeys/evidence/provider-prebeta-admission-") or not source.endswith(".redacted.json"):
+        result.error(f"{location}.source", "provider-prebeta journey-result artifact must be a provider-prebeta redacted evidence file")
+        return
+    artifact_path = _repository_path(root, source, f"{location}.source", result)
+    if artifact_path is None:
+        return
+    payload = _load_json(artifact_path, ValidationResult())
+    if not isinstance(payload, dict):
+        result.error(f"{location}.source", "provider-prebeta redacted evidence must be a JSON object")
+        return
+    if payload.get("schema_version") != PROVIDER_PREBETA_EVIDENCE_SCHEMA:
+        result.error(f"{location}.source.schema_version", f"must equal {PROVIDER_PREBETA_EVIDENCE_SCHEMA!r}")
+    if payload.get("journey_id") != PROVIDER_PREBETA_JOURNEY_ID:
+        result.error(f"{location}.source.journey_id", f"must equal {PROVIDER_PREBETA_JOURNEY_ID!r}")
+    payload_requirement_ids = _string_list(payload.get("requirement_ids"), f"{location}.source.requirement_ids", result, REQUIREMENT_ID_RE)
+    if payload_requirement_ids != signed.get("requirement_ids"):
+        result.error(f"{location}.source.requirement_ids", "must exactly match signed.requirement_ids")
+    repository = payload.get("repository")
+    signed_repository = signed.get("repository")
+    if _expect_object(repository, f"{location}.source.repository", result) and isinstance(signed_repository, dict):
+        _expect_keys(repository, {"name", "commit"}, {"name", "commit"}, f"{location}.source.repository", result)
+        if repository.get("name") != signed_repository.get("name"):
+            result.error(f"{location}.source.repository.name", "must match signed.repository.name")
+        if repository.get("commit") != signed_repository.get("commit"):
+            result.error(f"{location}.source.repository.commit", "must match signed.repository.commit")
+    if payload.get("captured_at") != signed.get("captured_at"):
+        result.error(f"{location}.source.captured_at", "must match signed.captured_at")
+    if payload.get("expires_at") != signed.get("expires_at"):
+        result.error(f"{location}.source.expires_at", "must match signed.expires_at")
+
+
+def _validate_provider_prebeta_journey_result(
+    root: Path,
+    signed: dict[str, Any],
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != PROVIDER_PREBETA_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {PROVIDER_PREBETA_JOURNEY_ID!r}")
+    if journeys != [PROVIDER_PREBETA_JOURNEY_ID]:
+        result.error(location, f"provider-prebeta requirement journeys must equal [{PROVIDER_PREBETA_JOURNEY_ID!r}]")
+    if signed.get("execution_mode") != PROVIDER_PREBETA_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {PROVIDER_PREBETA_EXECUTION_MODE!r}")
+
+    observed_step_ids: set[str] = set()
+    valid_step_count = 0
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("id"), str):
+            continue
+        valid_step_count += 1
+        step_id = step["id"]
+        if step_id in observed_step_ids:
+            result.error(f"{location}.signed.steps[{index}].id", f"duplicate provider-prebeta physical step {step_id!r}")
+        observed_step_ids.add(step_id)
+    missing_steps = PROVIDER_PREBETA_STEP_IDS - observed_step_ids
+    unexpected_steps = observed_step_ids - PROVIDER_PREBETA_STEP_IDS
+    if missing_steps:
+        result.error(f"{location}.signed.steps", f"missing provider-prebeta physical steps: {sorted(missing_steps)}")
+    if unexpected_steps:
+        result.error(f"{location}.signed.steps", f"unexpected provider-prebeta physical steps: {sorted(unexpected_steps)}")
+    if valid_step_count != len(PROVIDER_PREBETA_STEP_IDS):
+        result.error(f"{location}.signed.steps", f"must contain exactly {len(PROVIDER_PREBETA_STEP_IDS)} provider-prebeta physical steps")
+
+    valid_artifacts = [artifact for artifact in artifacts if isinstance(artifact, dict)]
+    if len(valid_artifacts) != 1:
+        result.error(f"{location}.signed.artifacts", "provider-prebeta journey-result must contain exactly one redacted evidence artifact")
+    for index, artifact in enumerate(artifacts):
+        if isinstance(artifact, dict):
+            _validate_provider_prebeta_artifact(root, artifact, signed, f"{location}.signed.artifacts[{index}]", result)
+
+
+def _validate_spec016_payout_journey_result(
+    root: Path,
+    signed: dict[str, Any],
+    source: str,
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != SPEC016_PAYOUT_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {SPEC016_PAYOUT_JOURNEY_ID!r}")
+    if journeys != [SPEC016_PAYOUT_JOURNEY_ID]:
+        result.error(location, f"SPEC-016 payout requirement journeys must equal [{SPEC016_PAYOUT_JOURNEY_ID!r}]")
+    if signed.get("spec_id") != SPEC016_PAYOUT_SPEC_ID:
+        result.error(f"{location}.signed.spec_id", f"must equal {SPEC016_PAYOUT_SPEC_ID!r}")
+    if signed.get("requirement_ids") != [SPEC016_PAYOUT_REQUIREMENT_ID]:
+        result.error(f"{location}.signed.requirement_ids", f"must equal [{SPEC016_PAYOUT_REQUIREMENT_ID!r}]")
+    if source.endswith(".candidate.json"):
+        result.error(location, "SPEC-016 payout journey-result cannot promote candidate-only artifact files")
+    _string(signed.get("run_id"), re.compile(r"^spec016-r002-payout-address-[A-Za-z0-9_.:-]+$"), f"{location}.signed.run_id", result)
+    if signed.get("execution_mode") != SPEC016_PAYOUT_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {SPEC016_PAYOUT_EXECUTION_MODE!r}")
+
+    harness = signed.get("harness")
+    if _expect_object(harness, f"{location}.signed.harness", result):
+        allowed_harness = {
+            "id",
+            "version",
+            "execution_mode",
+            "isolated_sqlite",
+            "real_provider_token_check",
+            "real_pause_validation",
+            "controlled_dependencies",
+            "production_runner_built",
+            "external_rpc_client_built",
+            "settlement_signer_built",
+            "release_promotion_attempted",
+        }
+        _expect_keys(harness, allowed_harness, allowed_harness, f"{location}.signed.harness", result)
+        _string(harness.get("id"), None, f"{location}.signed.harness.id", result)
+        _string(harness.get("version"), None, f"{location}.signed.harness.version", result)
+        if harness.get("execution_mode") != SPEC016_PAYOUT_EXECUTION_MODE:
+            result.error(f"{location}.signed.harness.execution_mode", f"must equal {SPEC016_PAYOUT_EXECUTION_MODE!r}")
+        for field_name in (
+            "isolated_sqlite",
+            "real_provider_token_check",
+            "real_pause_validation",
+            "controlled_dependencies",
+        ):
+            value = _bool_value(harness.get(field_name), f"{location}.signed.harness.{field_name}", result)
+            if value is not None and value is not True:
+                result.error(f"{location}.signed.harness.{field_name}", "must be true")
+        for field_name in (
+            "production_runner_built",
+            "external_rpc_client_built",
+            "settlement_signer_built",
+            "release_promotion_attempted",
+        ):
+            _require_false(harness, field_name, f"{location}.signed.harness", result)
+
+    config_before = signed.get("config_before")
+    if _expect_object(config_before, f"{location}.signed.config_before", result):
+        required_config_before = {"payout_enabled", "runner_started", "external_rpc_started", "settlement_signer_started"}
+        _expect_keys(config_before, required_config_before, required_config_before, f"{location}.signed.config_before", result)
+        for field_name in sorted(required_config_before):
+            _require_false(config_before, field_name, f"{location}.signed.config_before", result)
+
+    config_after = signed.get("config_after")
+    if _expect_object(config_after, f"{location}.signed.config_after", result):
+        required_config_after = {
+            "payout_enabled",
+            "runner_started",
+            "external_rpc_started",
+            "settlement_signer_started",
+            "settlement_attempted",
+            "production_side_effects",
+        }
+        _expect_keys(config_after, required_config_after, required_config_after, f"{location}.signed.config_after", result)
+        for field_name in sorted(required_config_after):
+            _require_false(config_after, field_name, f"{location}.signed.config_after", result)
+
+    restoration = signed.get("restoration")
+    if _expect_object(restoration, f"{location}.signed.restoration", result):
+        _expect_keys(restoration, {"result"}, {"result"}, f"{location}.signed.restoration", result)
+        _string(restoration.get("result"), None, f"{location}.signed.restoration.result", result)
+
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        required_observations = {
+            "provider_id_sha256",
+            "hot_wallet_sha256",
+            "first_address_sha256",
+            "eip712_digest_sha256",
+            "raw_signature_redacted",
+            "provider_token_redacted",
+            "private_keys_redacted",
+        }
+        allowed_observations = required_observations | {"rotated_address_sha256", "cooling_off_hours"}
+        _expect_keys(observations, required_observations, allowed_observations, f"{location}.signed.observations", result)
+        for field_name in ("provider_id_sha256", "hot_wallet_sha256", "first_address_sha256", "eip712_digest_sha256"):
+            _require_sha_field(observations, field_name, f"{location}.signed.observations", result)
+        if "rotated_address_sha256" in observations:
+            _require_sha_field(observations, "rotated_address_sha256", f"{location}.signed.observations", result)
+        if "cooling_off_hours" in observations and not isinstance(observations.get("cooling_off_hours"), int):
+            result.error(f"{location}.signed.observations.cooling_off_hours", "must be an integer")
+        for field_name in ("raw_signature_redacted", "provider_token_redacted", "private_keys_redacted"):
+            value = _bool_value(observations.get(field_name), f"{location}.signed.observations.{field_name}", result)
+            if value is not None and value is not True:
+                result.error(f"{location}.signed.observations.{field_name}", "must be true")
+
+    eip712 = signed.get("eip712")
+    if _expect_object(eip712, f"{location}.signed.eip712", result):
+        required_eip712 = {
+            "typed_data_artifact_sha256",
+            "digest_sha256",
+            "signer_address_sha256",
+            "verifier",
+            "verification_result",
+            "raw_signature_access_controlled",
+        }
+        _expect_keys(eip712, required_eip712, required_eip712, f"{location}.signed.eip712", result)
+        for field_name in ("typed_data_artifact_sha256", "digest_sha256", "signer_address_sha256"):
+            _require_sha_field(eip712, field_name, f"{location}.signed.eip712", result)
+        _string(eip712.get("verifier"), None, f"{location}.signed.eip712.verifier", result)
+        if eip712.get("verification_result") != "pass":
+            result.error(f"{location}.signed.eip712.verification_result", "must equal 'pass'")
+        value = _bool_value(eip712.get("raw_signature_access_controlled"), f"{location}.signed.eip712.raw_signature_access_controlled", result)
+        if value is not None and value is not True:
+            result.error(f"{location}.signed.eip712.raw_signature_access_controlled", "must be true")
+
+    candidate = signed.get("candidate")
+    if _expect_object(candidate, f"{location}.signed.candidate", result):
+        allowed_candidate = {
+            "coordinator_sha256",
+            "malibu_sha256",
+            "addresses_go_sha256",
+            "eip712_go_sha256",
+            "attempts_go_sha256",
+            "payout_address_client_sha256",
+            "payout_wallet_flow_sha256",
+            "payout_signer_resource_sha256",
+        }
+        _expect_keys(candidate, {"payout_address_client_sha256"}, allowed_candidate, f"{location}.signed.candidate", result)
+        coordinator_hash_fields = ("addresses_go_sha256", "eip712_go_sha256", "attempts_go_sha256")
+        if "coordinator_sha256" in candidate:
+            _require_sha_field(candidate, "coordinator_sha256", f"{location}.signed.candidate", result)
+        else:
+            for field_name in coordinator_hash_fields:
+                _require_sha_field(candidate, field_name, f"{location}.signed.candidate", result)
+        _require_sha_field(candidate, "payout_address_client_sha256", f"{location}.signed.candidate", result)
+        if "malibu_sha256" in candidate:
+            _require_sha_field(candidate, "malibu_sha256", f"{location}.signed.candidate", result)
+        else:
+            _require_sha_field(candidate, "payout_wallet_flow_sha256", f"{location}.signed.candidate", result)
+            _require_sha_field(candidate, "payout_signer_resource_sha256", f"{location}.signed.candidate", result)
+
+    signer = signed.get("signer")
+    if _expect_object(signer, f"{location}.signed.signer", result):
+        required_signer = {"key_id", "identity_fingerprint", "trust_root_sha256", "verification_result"}
+        _expect_keys(signer, required_signer, required_signer, f"{location}.signed.signer", result)
+        _string(signer.get("key_id"), None, f"{location}.signed.signer.key_id", result)
+        _require_sha_field(signer, "identity_fingerprint", f"{location}.signed.signer", result)
+        _require_sha_field(signer, "trust_root_sha256", f"{location}.signed.signer", result)
+        if signer.get("verification_result") != "pass":
+            result.error(f"{location}.signed.signer.verification_result", "must equal 'pass'")
+
+    observed_step_ids: set[str] = set()
+    valid_step_count = 0
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("id"), str):
+            continue
+        valid_step_count += 1
+        step_id = step["id"]
+        if step_id in observed_step_ids:
+            result.error(f"{location}.signed.steps[{index}].id", f"duplicate SPEC-016 payout physical step {step_id!r}")
+        observed_step_ids.add(step_id)
+    missing_steps = SPEC016_PAYOUT_STEP_IDS - observed_step_ids
+    unexpected_steps = observed_step_ids - SPEC016_PAYOUT_STEP_IDS
+    if missing_steps:
+        result.error(f"{location}.signed.steps", f"missing SPEC-016 payout physical steps: {sorted(missing_steps)}")
+    if unexpected_steps:
+        result.error(f"{location}.signed.steps", f"unexpected SPEC-016 payout physical steps: {sorted(unexpected_steps)}")
+    if valid_step_count != len(SPEC016_PAYOUT_STEP_IDS):
+        result.error(f"{location}.signed.steps", f"must contain exactly {len(SPEC016_PAYOUT_STEP_IDS)} SPEC-016 payout physical steps")
+
+    for index, artifact in enumerate(artifacts):
+        if isinstance(artifact, dict):
+            _validate_spec016_payout_artifact(root, artifact, f"{location}.signed.artifacts[{index}]", result)
+
+
+def _validate_signed_journey_result(
+    root: Path,
+    source: str,
+    requirement_id: str,
+    journeys: list[str],
+    evidence_commits: set[str],
+    trusted_public_key_sha256: str,
+    openssl_bin: str,
+    location: str,
+    result: ValidationResult,
+) -> bool:
+    before = len(result.errors)
+    path = _repository_path(root, source, location, result)
+    if path is None:
+        return False
+    envelope = _load_json(path, result)
+    if not _expect_object(envelope, location, result):
+        return False
+    _expect_keys(envelope, {"schema_version", "signatures", "signed"}, {"schema_version", "signatures", "signed"}, location, result)
+    if envelope.get("schema_version") != JOURNEY_RESULT_ENVELOPE_SCHEMA:
+        result.error(f"{location}.schema_version", f"must equal {JOURNEY_RESULT_ENVELOPE_SCHEMA!r}")
+
+    signed = envelope.get("signed")
+    if not _expect_object(signed, f"{location}.signed", result):
+        signed = {}
+    signed_digest = _canonical_json_sha256(signed)
+
+    signatures = envelope.get("signatures")
+    matching_verified_signature = False
+    if not isinstance(signatures, list):
+        result.error(f"{location}.signatures", "field 'signatures' must be an array")
+        signatures = []
+    if not signatures:
+        result.error(f"{location}.signatures", "signed journey-result requires at least one signature")
+    for index, signature in enumerate(signatures):
+        loc = f"{location}.signatures[{index}]"
+        if not _expect_object(signature, loc, result):
+            continue
+        _expect_keys(
+            signature,
+            {"algorithm", "key_id", "signature", "signed_sha256", "verified_at", "verifier"},
+            {"algorithm", "key_id", "signature", "signed_sha256", "verified_at", "verifier"},
+            loc,
+            result,
+        )
+        digest = _string(signature.get("signed_sha256"), SHA256_HEX_RE, f"{loc}.signed_sha256", result)
+        if digest and digest != signed_digest:
+            result.error(f"{loc}.signed_sha256", "does not match canonical signed payload SHA-256")
+        _datetime_z(signature.get("verified_at"), f"{loc}.verified_at", result)
+        _string(signature.get("verifier"), None, f"{loc}.verifier", result)
+        if digest == signed_digest and _verify_journey_result_signature(root, signed, signature, trusted_public_key_sha256, openssl_bin, loc, result):
+            matching_verified_signature = True
+    if not matching_verified_signature:
+        result.error(location, "signed journey-result requires a verified signature over the signed payload")
+
+    _expect_keys(
+        signed,
+        {
+            "schema_version",
+            "journey_id",
+            "requirement_ids",
+            "repository",
+            "captured_at",
+            "expires_at",
+            "operator",
+            "environment",
+            "artifacts",
+            "result",
+            "steps",
+            "redaction",
+        },
+        {
+            "schema_version",
+            "journey_id",
+            "requirement_ids",
+            "repository",
+            "captured_at",
+            "expires_at",
+            "operator",
+            "environment",
+            "artifacts",
+            "result",
+            "steps",
+            "redaction",
+            "spec_id",
+            "run_id",
+            "execution_mode",
+            "harness",
+            "config_before",
+            "config_after",
+            "restoration",
+            "observations",
+            "eip712",
+            "candidate",
+            "signer",
+        },
+        f"{location}.signed",
+        result,
+    )
+    if signed.get("schema_version") != JOURNEY_RESULT_PAYLOAD_SCHEMA:
+        result.error(f"{location}.signed.schema_version", f"must equal {JOURNEY_RESULT_PAYLOAD_SCHEMA!r}")
+    journey_id = _string(signed.get("journey_id"), JOURNEY_RE, f"{location}.signed.journey_id", result)
+    if journey_id and journey_id not in journeys:
+        result.error(f"{location}.signed.journey_id", f"does not match mapped journeys {journeys}")
+    requirement_ids = _string_list(signed.get("requirement_ids"), f"{location}.signed.requirement_ids", result, REQUIREMENT_ID_RE)
+    if requirement_id not in requirement_ids:
+        result.error(f"{location}.signed.requirement_ids", f"does not cover requirement {requirement_id}")
+    _datetime_z(signed.get("captured_at"), f"{location}.signed.captured_at", result)
+    expires_at = _date(signed.get("expires_at"), f"{location}.signed.expires_at", result)
+    if expires_at and expires_at < date.today():
+        result.error(f"{location}.signed.expires_at", f"signed journey-result expired on {expires_at.isoformat()}")
+
+    operator = signed.get("operator")
+    if _expect_object(operator, f"{location}.signed.operator", result):
+        _expect_keys(operator, {"role", "identity_fingerprint"}, {"role", "identity_fingerprint"}, f"{location}.signed.operator", result)
+        _string(operator.get("role"), None, f"{location}.signed.operator.role", result)
+        _string(operator.get("identity_fingerprint"), SHA256_HEX_RE, f"{location}.signed.operator.identity_fingerprint", result)
+
+    environment = signed.get("environment")
+    if _expect_object(environment, f"{location}.signed.environment", result):
+        _expect_keys(
+            environment,
+            {"class", "hardware_profile", "candidate"},
+            {"class", "hardware_profile", "candidate"},
+            f"{location}.signed.environment",
+            result,
+        )
+        _string(environment.get("class"), None, f"{location}.signed.environment.class", result)
+        _string(environment.get("hardware_profile"), None, f"{location}.signed.environment.hardware_profile", result)
+        _string(environment.get("candidate"), None, f"{location}.signed.environment.candidate", result)
+
+    repository = signed.get("repository")
+    if _expect_object(repository, f"{location}.signed.repository", result):
+        _expect_keys(repository, {"name", "commit"}, {"name", "commit"}, f"{location}.signed.repository", result)
+        if repository.get("name") != "Augustas11/macprovider":
+            result.error(f"{location}.signed.repository.name", "must equal 'Augustas11/macprovider'")
+        commit = _string(repository.get("commit"), COMMIT_RE, f"{location}.signed.repository.commit", result)
+        if commit and not _reachable_commit(root, commit):
+            result.error(f"{location}.signed.repository.commit", f"commit is not reachable: {commit}")
+        if commit and evidence_commits and commit not in evidence_commits:
+            result.error(f"{location}.signed.repository.commit", "must match this requirement's commit evidence")
+
+    artifact_ids: set[str] = set()
+    artifact_records = signed.get("artifacts")
+    if not isinstance(artifact_records, list):
+        result.error(f"{location}.signed.artifacts", "field 'artifacts' must be an array")
+        artifact_records = []
+    if not artifact_records:
+        result.error(f"{location}.signed.artifacts", "must contain at least one hash-bound artifact")
+    for index, artifact in enumerate(artifact_records):
+        loc = f"{location}.signed.artifacts[{index}]"
+        if not _expect_object(artifact, loc, result):
+            continue
+        _expect_keys(artifact, {"id", "sha256", "source"}, {"id", "sha256", "source"}, loc, result)
+        artifact_id = _string(artifact.get("id"), None, f"{loc}.id", result)
+        if artifact_id:
+            if artifact_id in artifact_ids:
+                result.error(f"{loc}.id", f"duplicate artifact id {artifact_id!r}")
+            artifact_ids.add(artifact_id)
+        expected_sha = _string(artifact.get("sha256"), SHA256_HEX_RE, f"{loc}.sha256", result)
+        artifact_source = _string(artifact.get("source"), None, f"{loc}.source", result)
+        if artifact_source:
+            if not _source_under_journey_evidence(root, artifact_source):
+                result.error(f"{loc}.source", "must be under journeys/evidence/")
+            artifact_path = _repository_path(root, artifact_source, f"{loc}.source", result)
+            if artifact_path is not None:
+                try:
+                    actual_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+                except OSError as exc:
+                    result.error(f"{loc}.source", f"cannot read artifact source: {exc}")
+                else:
+                    if expected_sha and actual_sha != expected_sha:
+                        result.error(f"{loc}.sha256", "does not match artifact source bytes")
+
+    run_result = signed.get("result")
+    if _expect_object(run_result, f"{location}.signed.result", result):
+        _expect_keys(run_result, {"status"}, {"status", "summary"}, f"{location}.signed.result", result)
+        if run_result.get("status") != "pass":
+            result.error(f"{location}.signed.result.status", "must equal 'pass'")
+        if "summary" in run_result:
+            _string(run_result.get("summary"), None, f"{location}.signed.result.summary", result)
+
+    steps = signed.get("steps")
+    if not isinstance(steps, list):
+        result.error(f"{location}.signed.steps", "field 'steps' must be an array")
+        steps = []
+    if not steps:
+        result.error(f"{location}.signed.steps", "must contain at least one result entry")
+    for index, step in enumerate(steps):
+        loc = f"{location}.signed.steps[{index}]"
+        if not _expect_object(step, loc, result):
+            continue
+        _expect_keys(step, {"id", "status", "artifacts"}, {"id", "status", "artifacts", "assertion"}, loc, result)
+        _string(step.get("id"), None, f"{loc}.id", result)
+        if step.get("status") != "pass":
+            result.error(f"{loc}.status", "must equal 'pass'")
+        step_artifacts = _string_list(step.get("artifacts"), f"{loc}.artifacts", result)
+        if not step_artifacts:
+            result.error(f"{loc}.artifacts", "must contain at least one artifact reference")
+        for artifact_id in step_artifacts:
+            if artifact_ids and artifact_id not in artifact_ids:
+                result.error(f"{loc}.artifacts", f"unknown artifact reference {artifact_id!r}")
+        if "assertion" in step:
+            _string(step.get("assertion"), None, f"{loc}.assertion", result)
+
+    redaction = signed.get("redaction")
+    if _expect_object(redaction, f"{location}.signed.redaction", result):
+        required_redactions = {"secrets_redacted", "operator_identity_redacted", "local_account_names_redacted"}
+        _expect_keys(redaction, required_redactions, required_redactions, f"{location}.signed.redaction", result)
+        for field_name in sorted(required_redactions):
+            if redaction.get(field_name) is not True:
+                result.error(f"{location}.signed.redaction.{field_name}", "must be true")
+
+    if journey_id == SPEC016_PAYOUT_JOURNEY_ID or requirement_id == SPEC016_PAYOUT_REQUIREMENT_ID:
+        if requirement_id != SPEC016_PAYOUT_REQUIREMENT_ID:
+            result.error(f"{location}.signed.requirement_ids", f"SPEC-016 payout journey-result may only promote {SPEC016_PAYOUT_REQUIREMENT_ID}")
+        _validate_spec016_payout_journey_result(root, signed, source, journeys, artifact_records, steps, location, result)
+    if journey_id == PROVIDER_PREBETA_JOURNEY_ID:
+        _validate_provider_prebeta_journey_result(root, signed, [item for item in journeys if isinstance(item, str)], artifact_records, steps, location, result)
+
+    return len(result.errors) == before
+
+
+def _signed_journey_result_satisfies(
+    root: Path,
+    requirement: dict[str, Any],
+    location: str,
+    result: ValidationResult,
+    trusted_public_key_sha256: str,
+    openssl_bin: str,
+    emit_errors: bool = True,
+) -> bool:
+    requirement_id = requirement.get("requirement_id")
+    journeys = requirement.get("journeys")
+    if not isinstance(requirement_id, str) or not isinstance(journeys, list):
+        return False
+    evidence_items = requirement.get("evidence", []) if isinstance(requirement.get("evidence"), list) else []
+    evidence_commits = {
+        evidence.get("artifact", "").split(":", 1)[1]
+        for evidence in evidence_items
+        if isinstance(evidence, dict)
+        and isinstance(evidence.get("artifact"), str)
+        and evidence["artifact"].startswith("commit:")
+    }
+    candidate_errors: list[str] = []
+    saw_candidate = False
+    for index, evidence in enumerate(evidence_items):
+        if not isinstance(evidence, dict):
+            continue
+        artifact = evidence.get("artifact")
+        source = evidence.get("source")
+        if (
+            isinstance(artifact, str)
+            and artifact.startswith("sha256:")
+            and isinstance(source, str)
+            and _source_under_journey_evidence(root, source)
+        ):
+            if not _looks_like_signed_journey_result(root, source):
+                continue
+            saw_candidate = True
+            candidate_result = ValidationResult()
+            if _validate_signed_journey_result(
+                root,
+                source,
+                requirement_id,
+                [item for item in journeys if isinstance(item, str)],
+                evidence_commits,
+                trusted_public_key_sha256,
+                openssl_bin,
+                f"{location}.evidence[{index}].source",
+                candidate_result,
+            ):
+                return True
+            candidate_errors.extend(candidate_result.errors)
+    if emit_errors:
+        if candidate_errors:
+            result.errors.extend(candidate_errors)
+        elif not saw_candidate:
+            result.error(location, "sensitive conformant requirement requires sha256 signed journey-result evidence under journeys/evidence/")
+    return False
+
+
 def _commit_file_matches_current(root: Path, commit: str, relative: str) -> bool:
     completed = subprocess.run(
         ["git", "show", f"{commit}:{relative}"],
@@ -391,7 +1167,11 @@ def _validate_base_manifest_immutability(
         return
     base_authority = _git_show_json(root, base_ref, "specs/AUTHORITY.json")
     base_conformance = _git_show_json(root, base_ref, "specs/CONFORMANCE.json")
-    if not isinstance(base_authority, dict) or not isinstance(base_conformance, dict):
+    if not isinstance(base_authority, dict):
+        result.error("base-ref", f"cannot load specs/AUTHORITY.json from {base_ref!r}")
+        return
+    if not isinstance(base_conformance, dict):
+        result.error("base-ref", f"cannot load specs/CONFORMANCE.json from {base_ref!r}")
         return
 
     head_domains = {
@@ -682,11 +1462,22 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
     return [item for item in specs if isinstance(item, dict)], [item for item in requirements if isinstance(item, dict)]
 
 
-def validate_repository(root: Path, base_ref: str | None = None) -> ValidationResult:
+def validate_repository(
+    root: Path,
+    base_ref: str | None = None,
+    trusted_journey_result_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
+    conformance_override: dict[str, Any] | None = None,
+    openssl_bin: str | None = None,
+) -> ValidationResult:
     root = root.resolve()
     result = ValidationResult()
+    try:
+        trusted_openssl = resolve_trusted_openssl(openssl_bin)
+    except ValueError as exc:
+        result.error("openssl", str(exc))
+        return result
     authority = _load_json(root / "specs" / "AUTHORITY.json", result)
-    conformance = _load_json(root / "specs" / "CONFORMANCE.json", result)
+    conformance = conformance_override if conformance_override is not None else _load_json(root / "specs" / "CONFORMANCE.json", result)
     if authority is None or conformance is None:
         return result
 
@@ -694,11 +1485,20 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
     specs, requirements = _validate_conformance_schema(root, conformance, result)
     schema_authority = _load_json(root / "schemas" / "spec-authority-v1.schema.json", result)
     schema_conformance = _load_json(root / "schemas" / "spec-conformance-v1.schema.json", result)
+    schema_journey_result = _load_json(root / "schemas" / "journey-result-v1.schema.json", result)
     schema_pr = _load_json(root / "schemas" / "spec-pr-governance-v1.schema.json", result)
     if isinstance(schema_authority, dict) and schema_authority.get("$id") != "https://github.com/Augustas11/macprovider/schemas/spec-authority-v1.schema.json":
         result.error("schemas/spec-authority-v1.schema.json.$id", "unexpected schema id")
     if isinstance(schema_conformance, dict) and schema_conformance.get("$id") != "https://github.com/Augustas11/macprovider/schemas/spec-conformance-v1.schema.json":
         result.error("schemas/spec-conformance-v1.schema.json.$id", "unexpected schema id")
+    if isinstance(schema_journey_result, dict) and schema_journey_result.get("$id") != JOURNEY_RESULT_SCHEMA_ID:
+        result.error("schemas/journey-result-v1.schema.json.$id", "unexpected schema id")
+    if isinstance(schema_journey_result, dict):
+        schema_signature = schema_journey_result.get("$defs", {}).get("signature", {}).get("properties", {})
+        if schema_signature.get("algorithm", {}).get("const") != JOURNEY_RESULT_SIGNING_ALGORITHM:
+            result.error("schemas/journey-result-v1.schema.json.$defs.signature.properties.algorithm.const", "does not match validator signing algorithm")
+        if schema_signature.get("key_id", {}).get("const") != JOURNEY_RESULT_SIGNING_KEY_ID:
+            result.error("schemas/journey-result-v1.schema.json.$defs.signature.properties.key_id.const", "does not match validator signing key id")
     if isinstance(schema_pr, dict) and schema_pr.get("$id") != "https://github.com/Augustas11/macprovider/schemas/spec-pr-governance-v1.schema.json":
         result.error("schemas/spec-pr-governance-v1.schema.json.$id", "unexpected schema id")
 
@@ -831,10 +1631,39 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
             ]
             if nonconformant:
                 result.error(spec_id, "implementation_status implemented requires every owned requirement to be conformant")
+        requires_signed_result = any(
+            domain_records.get(domain_id, {}).get("requires_signed_journey_result") is True
+            for domain_id in spec.get("authority_domains", [])
+            if isinstance(domain_id, str)
+        )
         if spec.get("production_status") == "physically-verified":
-            result.error(spec_id, "production_status physically-verified requires signed journey-result contract before promotion")
+            if not owned_requirements:
+                result.error(spec_id, "production_status physically-verified requires at least one owned requirement")
+            nonconformant = [
+                item.get("requirement_id")
+                for item in owned_requirements
+                if item.get("state") != "conformant"
+            ]
+            if nonconformant:
+                result.error(spec_id, "production_status physically-verified requires every owned requirement to be conformant")
+            if requires_signed_result:
+                missing_signed = [
+                    item.get("requirement_id")
+                    for item in owned_requirements
+                    if item.get("state") == "conformant"
+                    and not _signed_journey_result_satisfies(
+                        root,
+                        item,
+                        str(item.get("requirement_id")),
+                        result,
+                        trusted_journey_result_public_key_sha256,
+                        trusted_openssl,
+                        emit_errors=False,
+                    )
+                ]
+                if missing_signed:
+                    result.error(spec_id, "production_status physically-verified requires valid signed journey-result evidence for every owned requirement")
         if spec.get("status") == "physically-verified":
-            result.error(spec_id, "physically-verified requires signed journey-result contract before promotion")
             nonconformant = [
                 item.get("requirement_id")
                 for item in owned_requirements
@@ -842,6 +1671,23 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
             ]
             if nonconformant:
                 result.error(spec_id, "physically-verified requires every owned requirement to be conformant")
+            if requires_signed_result:
+                missing_signed = [
+                    item.get("requirement_id")
+                    for item in owned_requirements
+                    if item.get("state") == "conformant"
+                    and not _signed_journey_result_satisfies(
+                        root,
+                        item,
+                        str(item.get("requirement_id")),
+                        result,
+                        trusted_journey_result_public_key_sha256,
+                        trusted_openssl,
+                        emit_errors=False,
+                    )
+                ]
+                if missing_signed:
+                    result.error(spec_id, "physically-verified requires valid signed journey-result evidence for every owned requirement")
 
     for requirement_id, requirement in requirements_by_id.items():
         for mapping_key in ("implementation", "tests"):
@@ -854,24 +1700,17 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
                 domain.get("requires_signed_journey_result") is True
                 and requirement.get("state") == "conformant"
             ):
-                result.error(requirement_id, "sensitive conformant requirement requires signed journey-result contract before promotion")
                 if not requirement.get("journeys"):
                     result.error(requirement_id, "sensitive conformant requirement requires a physical journey mapping")
-                has_physical_artifact = False
-                for evidence in requirement.get("evidence", []):
-                    if not isinstance(evidence, dict):
-                        continue
-                    source = evidence.get("source")
-                    artifact = evidence.get("artifact")
-                    if (
-                        isinstance(source, str)
-                        and _source_under_journey_evidence(root, source)
-                        and isinstance(artifact, str)
-                        and artifact.startswith("sha256:")
-                    ):
-                        has_physical_artifact = True
-                if not has_physical_artifact:
-                    result.error(requirement_id, "sensitive conformant requirement requires sha256 journey evidence under journeys/evidence/")
+                if not _signed_journey_result_satisfies(
+                    root,
+                    requirement,
+                    requirement_id,
+                    result,
+                    trusted_journey_result_public_key_sha256,
+                    trusted_openssl,
+                ):
+                    result.error(requirement_id, "sensitive conformant requirement requires valid signed journey-result evidence")
 
     return result
 
@@ -880,8 +1719,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".", help="repository root")
     parser.add_argument("--base-ref", default=None, help="trusted base ref for structured identity immutability checks")
+    parser.add_argument("--openssl-bin", default=None, help="absolute path to trusted OpenSSL")
     args = parser.parse_args(argv)
-    result = validate_repository(Path(args.root), args.base_ref)
+    result = validate_repository(Path(args.root), args.base_ref, openssl_bin=args.openssl_bin)
     if result.errors:
         for error in result.errors:
             print(f"error: {error}", file=sys.stderr)

@@ -19,7 +19,8 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/stats/hardwareverify"
 )
 
-const hardwareEvidenceSchemaVersion = "hardware_evidence.autotune.v1"
+const hardwareEvidenceSchemaVersion = "hardware_evidence.autotune.v2"
+const hardwareEvidenceProbeProtocol = "spec-023-harmony-stream.v2"
 const hardwareEvidenceRecentWindow = 10 * time.Minute
 const hardwareEvidenceMaxAge = 7 * 24 * time.Hour
 const hardwareEvidenceFutureSkew = 5 * time.Minute
@@ -46,6 +47,7 @@ type HardwareEvidenceRequest struct {
 	Hardware               HardwareEvidenceHardware    `json:"hardware"`
 	CandidateCatalogSHA256 string                      `json:"candidate_catalog_sha256"`
 	RecommendedModel       string                      `json:"recommended_model"`
+	ProbeProtocol          string                      `json:"probe_protocol"`
 	Benchmarks             []HardwareEvidenceBenchmark `json:"benchmarks"`
 }
 
@@ -57,11 +59,12 @@ type HardwareEvidenceHardware struct {
 	OSVersion            string `json:"os_version"`
 	BinaryVersion        string `json:"binary_version"`
 	HardwareIdentityHash string `json:"hardware_identity_hash"`
+	ExecutableSHA256     string `json:"executable_sha256"`
 }
 
 type HardwareEvidenceBenchmark struct {
-	ModelKey                string  `json:"model_key"`
-	ModelID                 string  `json:"model_id"`
+	ModelKey string `json:"model_key"`
+	ModelID  string `json:"model_id"`
 	// ModelArtifactPath is the resolved local load path actually probed (#745 AC-4).
 	ModelArtifactPath       string  `json:"model_artifact_path,omitempty"`
 	SustainedTPS            float64 `json:"sustained_tps"`
@@ -70,7 +73,7 @@ type HardwareEvidenceBenchmark struct {
 	ThermalThrottleDetected bool    `json:"thermal_throttle_detected"`
 	ArtifactSHA256          string  `json:"artifact_sha256"`
 	CandidateCatalogSHA256  string  `json:"candidate_catalog_sha256"`
-	CandidateRowIdentity    string  `json:"candidate_row_identity,omitempty"`
+	CandidateRowIdentity    string  `json:"candidate_row_identity"`
 	BenchmarkID             string  `json:"benchmark_id,omitempty"`
 	GeneratedAt             string  `json:"generated_at"`
 	BinaryVersion           string  `json:"binary_version"`
@@ -82,6 +85,7 @@ type HardwareEvidenceJobRecord struct {
 	EvidenceSHA    string
 	Status         string
 	DecisionReason string
+	Replay         bool
 }
 
 // InsertHardwareVerificationJob queues provider-authenticated evidence for the
@@ -342,6 +346,7 @@ func hardwareEvidenceResponseStatus(record HardwareEvidenceJobRecord, replay boo
 	if record.JobID <= 0 || record.EvidenceSHA != expectedEvidenceSHA || !isLowerSHA256(record.EvidenceSHA) {
 		return "", false
 	}
+	replay = replay || record.Replay
 	switch record.Status {
 	case hardwareEvidenceJobPending:
 		if replay {
@@ -371,7 +376,10 @@ func writeHardwareEvidenceResponse(w http.ResponseWriter, status, providerID str
 
 func (h *Handler) validateHardwareEvidence(req HardwareEvidenceRequest, tokenProviderID string) (time.Time, error) {
 	if req.SchemaVersion != hardwareEvidenceSchemaVersion {
-		return time.Time{}, errors.New("schema_version must be hardware_evidence.autotune.v1")
+		return time.Time{}, errors.New("schema_version must be hardware_evidence.autotune.v2")
+	}
+	if req.ProbeProtocol != hardwareEvidenceProbeProtocol {
+		return time.Time{}, errors.New("probe_protocol is not the supported SPEC-023 protocol")
 	}
 	if strings.TrimSpace(req.ProviderID) == "" || len(req.ProviderID) > 128 {
 		return time.Time{}, errors.New("provider_id is required")
@@ -412,6 +420,9 @@ func (h *Handler) validateHardwareEvidence(req HardwareEvidenceRequest, tokenPro
 	}
 	if !isLowerSHA256(req.Hardware.HardwareIdentityHash) {
 		return time.Time{}, errors.New("hardware.hardware_identity_hash must be lowercase sha256")
+	}
+	if !isLowerSHA256(req.Hardware.ExecutableSHA256) {
+		return time.Time{}, errors.New("hardware.executable_sha256 must be lowercase sha256")
 	}
 	if !isLowerSHA256(req.CandidateCatalogSHA256) {
 		return time.Time{}, errors.New("candidate_catalog_sha256 must be lowercase sha256")
@@ -463,7 +474,7 @@ func (h *Handler) validateHardwareEvidence(req HardwareEvidenceRequest, tokenPro
 		if b.HardwareIdentityHash != req.Hardware.HardwareIdentityHash {
 			return time.Time{}, errors.New("benchmark.hardware_identity_hash must match hardware")
 		}
-		if b.CandidateRowIdentity != "" && (len(b.CandidateRowIdentity) != 64 || !isLowerHex(b.CandidateRowIdentity)) {
+		if len(b.CandidateRowIdentity) != 64 || !isLowerHex(b.CandidateRowIdentity) {
 			return time.Time{}, errors.New("benchmark.candidate_row_identity must be 64 lowercase hex characters")
 		}
 	}

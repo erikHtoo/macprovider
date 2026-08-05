@@ -150,7 +150,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.12",
+      "version": "0.9.13",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -426,7 +426,7 @@
     {
       "spec_id": "SPEC-016",
       "title": "Provider payout pipeline (USDC on Base)",
-      "version": "0.1.23",
+      "version": "0.1.25",
       "path": "specs/SPEC-016-payout-pipeline.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -439,16 +439,30 @@
         "SPEC-006",
         "SPEC-014"
       ],
-      "implementation_status": "pending-reconciliation",
-      "production_status": "pending-verification",
-      "last_reconciled_commit": null,
-      "last_reconciled_at": null,
-      "evidence": [],
+      "implementation_status": "partial",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": "bc551b952420101fb8e8f42bd4c051bd7800288d",
+      "last_reconciled_at": "2026-08-03",
+      "evidence": [
+        {
+          "artifact": "commit:ed26cc8f3178b5da44fae93483df1d931410e35f",
+          "source": null,
+          "captured_at": "2026-07-31",
+          "expires_at": "2027-07-31"
+        },
+        {
+          "artifact": "commit:64d4ba620bf7d52704ad3b7c0071fbe94c0d7d82",
+          "source": null,
+          "captured_at": "2026-08-03",
+          "expires_at": "2027-08-03"
+        }
+      ],
       "requirement_id_migration": "pending",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "PR #164 merged the SPEC-016 USDC-on-Base payout implementation, PR #827 repaired the spec-index drift, and PR #882 added the provider-facing Add Wallet registration flow. R002 now has canonical implementation/test anchors and a contract-only physical journey; the runner remains default-off and no production activation claim is made. Exhaustive clause-level requirement ID migration, signed journey evidence, §9 operator prerequisites, production deployment, and the remaining per-requirement reconciliations remain pending under the payout-lifecycle domain."
       }
     },
     {
@@ -484,7 +498,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -638,7 +652,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.8.6",
+      "version": "v0.9.3",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -886,7 +900,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.2.2",
+      "version": "v0.2.5",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1130,6 +1144,29 @@
   ],
   "requirements": [
     {
+      "requirement_id": "SPEC-001-R001",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func setSleepAssertionDesired",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func runReconnectLoop",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func drainFromCoordinator"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionSurvivesDisconnectAndReleasesOnStop",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionFollowsServingIntent",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionRefusesReArmAfterStop"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/854",
+        "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff, and coordinator drain (§6.5 / FR-13 / FR-15 / AC-16): PR #853 binds the macOS sleep assertion to serving intent under regression tests, but production physical uptime evidence remains pending."
+      }
+    },
+    {
       "requirement_id": "SPEC-002-R001",
       "spec_id": "SPEC-002",
       "state": "pending",
@@ -1210,13 +1247,15 @@
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCanonicalModelIdentityIsNamedAcrossAdmissionAndHeartbeat",
         "phase4-coordinator/internal/pool/provider_test.go::TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Issue #609 implements and unit-tests the canonical Air artifact identity; conformance remains pending until the signed physical provider-to-buyer journey records the exact admitted artifact."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "Issue #609 implements and unit-tests the canonical Air artifact identity. The provider-prebeta admission journey is now mapped as the scoped physical proof path for admitted model identity; conformance remains pending until #895 captures the exact admitted artifact and #896 supplies the signed journey-result contract required for sensitive promotion."
       }
     },
     {
@@ -1233,13 +1272,15 @@
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift::testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence",
         "phase4-coordinator/internal/ws/model_identity_test.go::TestCanonicalModelIdentityUsesSignedAutotuneRowWithoutTier2Fallback"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Issue #609 implements typed admission and heartbeat semantics; the signed physical journey must still prove the production coordinator receives and preserves the named identity."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "Issue #609 implements typed admission and heartbeat semantics. The provider-prebeta admission journey is now mapped as the scoped production proof path; conformance remains pending until #895 proves the production coordinator receives and preserves the named identity and #896 supplies the signed journey-result contract required for sensitive promotion."
       }
     },
     {
@@ -1255,13 +1296,15 @@
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapBootTrustDoesNotCompareWeightManifestToCanonicalArtifactHash",
         "phase4-coordinator/internal/pool/provider_test.go::TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Issue #609 separates weights diagnostics from catalog authority in code and tests; physical evidence remains required before promotion."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "Issue #609 separates weights diagnostics from catalog authority in code and tests. The provider-prebeta admission journey is now mapped as the scoped physical proof path; conformance remains pending until #895 captures the provider catalog/model evidence and #896 supplies the signed journey-result contract required for sensitive promotion."
       }
     },
     {
@@ -1281,13 +1324,15 @@
         "phase4-coordinator/internal/billing/route_snapshot_test.go::TestRouteSnapshotStrictKeysAndDigestSensitivity",
         "phase4-coordinator/internal/buyer/route_snapshot_test.go::TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Issue #609 binds admission, heartbeat, route snapshot, and receipt evidence to one exact signed row; a signed physical buyer request must still verify the production route and receipt chain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "Issue #609 binds admission, heartbeat, route snapshot, and receipt evidence to one exact signed row. The provider-prebeta admission journey is now mapped for the serving-smoke subset only; conformance remains pending until #895 verifies the production route to the admitted provider and #896 supplies the signed journey-result contract required for sensitive promotion. Full receipt-chain reconciliation remains outside provider pre-beta unless separately enabled."
       }
     },
     {
@@ -1304,13 +1349,15 @@
         "phase4-coordinator/internal/config/config_test.go::TestModelHashLegacyDeadlineEnvResolutionFailsClosed",
         "phase4-coordinator/dist/test/check_deploy_config_test.sh:test_model_hash_legacy_deadline"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Issue #609 implements the finite bridge and deploy preflight; rollout evidence must count legacy providers, upgrade them, and prove the bridge can be removed without buyer-serving regression."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "Issue #609 implements the finite bridge and deploy preflight. For provider pre-beta, #895 must record whether any admitted cohort provider still depends on the bridge and prove buyer-serving smoke after admission or upgrade. The broader legacy fleet retirement proof remains pending outside this slice."
       }
     },
     {
@@ -1326,13 +1373,15 @@
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapInvalidatesSameModelIDWhenArtifactHashChanges",
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift::testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Issue #609 fails closed when a warm-swap target lacks an exact signed row; a signed physical swap journey remains required before enabling the path in production."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "Issue #609 fails closed when a warm-swap target lacks an exact signed row. For provider pre-beta, #895 must prove the selected cohort model row and startup model readiness; operator-pushed warm-swap production enablement remains outside this slice unless explicitly enabled."
       }
     },
     {
@@ -1357,6 +1406,29 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC-018 v0.2.5 defines the #743 Harmony token-ID response parsing contract; conformance remains pending until the implementation and regression evidence are reconciled against AC-57 through AC-61."
       }
+    },
+    {
+      "requirement_id": "SPEC-018-R002",
+      "spec_id": "SPEC-018",
+      "state": "conformant",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:enum ToolCallParser",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct NativeToolCallStreamEmitter"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:final class ToolCallParserTests",
+        "phase3-binary/Tests/macprovider-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests"
+      ],
+      "journeys": [],
+      "evidence": [
+        {
+          "artifact": "commit:2eb606d5bc252abe7eb604f116136a749d981527",
+          "source": null,
+          "captured_at": "2026-08-04",
+          "expires_at": "2027-08-04"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-020-R001",
@@ -1396,8 +1468,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Append-only signed discovery, protected renewal, anonymous v1.8.55 bridge verification, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama readiness, Air5/Qwen fail-closed rollback, and the original Pearl/Air5 blockers. The supplemental Air5 convergence artifact records Pearl advertising v1.8.61, M3 hardware-trust approval/verifier success, signed v1.8.61 package/catalog verification, Air5 ready/routing-eligible v1.8.61 admission, and target_not_newer coordinator observation. The remaining blocker is governance packaging: a signed journey-result contract and explicit conformance promotion, not the earlier Air5 operational blocker."
+        "issue": "https://github.com/Augustas11/macprovider/issues/896",
+        "rationale": "Append-only signed discovery, protected renewal, anonymous v1.8.55 bridge verification, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama readiness, Air5/Qwen fail-closed rollback, and the original Pearl/Air5 blockers. The supplemental Air5 convergence artifact records Pearl advertising v1.8.61, M3 hardware-trust approval/verifier success, signed v1.8.61 package/catalog verification, Air5 ready/routing-eligible v1.8.61 admission, and target_not_newer coordinator observation. The remaining blocker is governance packaging: a #896 signed journey-result contract and explicit conformance promotion, not the earlier Air5 operational blocker."
       }
     },
     {
@@ -1439,7 +1511,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "issue": "https://github.com/Augustas11/macprovider/issues/896",
         "rationale": "Manual signed-release recovery, append-only transport, protected renewal, anonymous v1.8.55 bridge verification, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama manual update no-op at v1.8.61 and Air5/Qwen fail-closed behavior for the v1.8.56 updater plus installer rollback when SSH Keychain access is unavailable. The supplemental Air5 convergence artifact records successful GUI manual recovery to v1.8.61 after coordinator hardware trust was unblocked. Disconnected or coordinator-rejected recovery still needs signed journey-result packaging before promotion."
       }
     },
@@ -1481,7 +1553,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "issue": "https://github.com/Augustas11/macprovider/issues/896",
         "rationale": "Local signed-set health, exact-set success binding, startup recovery, rollback policy, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama local binary/discovery/update-lock state and Air5/Qwen rollback after required hardware-evidence admission returned HTTP 429 before service start. The supplemental Air5 convergence artifact records that the blocker was removed and that Air5 committed v1.8.61 bytes, exact CLI SHA-256, launchd activation, local model readiness, and Pearl ready admission. A controlled committed-target rollback fault and signed journey-result packaging remain open before promotion."
       }
     },
@@ -1575,7 +1647,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "issue": "https://github.com/Augustas11/macprovider/issues/896",
         "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, rollback-entry fencing, legacy first-hop bridge regressions, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records Air5/Qwen launchd PID change across installer rollback, restored provider/watchdog/manifest/service state, and empty update locks after the run. The supplemental Air5 convergence artifact records successful launchd service activation at v1.8.61, Pearl ready/routing-eligible admission, encrypted leg and hash verification, model_loaded telemetry, and an HTTP 200 buyer request routed to Air5. Signed journey-result packaging still needs to bind lock/fence/listener/cleanup evidence into a promotable conformance record."
       }
     },
@@ -1596,13 +1668,15 @@
         "phase4-coordinator/internal/autotune/gate_test.go::TestEvaluateHelloGateTreatsTPSAndTTFTMissesAsAdvisory",
         "phase4-coordinator/internal/autotune/gate_test.go::TestEvaluateHelloGateRejectsThermalThrottle"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired here, but the requirement remains pending until a signed candidate completes the physical referral/X acceptance journey."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired in code and tests. The provider-prebeta admission journey is now mapped to prove the operator-visible autotune transcript and model-readiness decision on a real provider; real-X dwell reward evidence remains outside the provider-admission subset unless explicitly enabled."
       }
     },
     {
@@ -1621,13 +1695,15 @@
         "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTranscriptSanitizesBenchGateProvenanceControlCharacters",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift::testDonorModeApplyWarningMatchesSpec"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "A6 repairs human transcript label honesty, benchmark-count semantics, and donor-mode warning copy in code and tests; SPEC-023 remains pending until a signed physical installer/autotune journey proves the operator-visible transcript in production."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "A6 repairs human transcript label honesty, benchmark-count semantics, and donor-mode warning copy in code and tests. The provider-prebeta admission journey is now mapped as the scoped physical installer/autotune proof; conformance remains pending until #895 captures the operator-visible transcript in production-equivalent conditions."
       }
     },
     {
@@ -1650,13 +1726,15 @@
         "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatInCeilingModelClearsRouteExclusion",
         "phase4-coordinator/internal/ws/warmup_internal_test.go:TestWarmupGateSkipsAdmissionCeilingExcludedProvider"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "B2 implements coordinator route/capacity exclusion for over-ceiling and uncatalogued heartbeat model transitions under strict hello-gate unit tests. Gate-off production posture remains observe-only, and Pearl deploy evidence remains pending."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "B2 implements coordinator route/capacity exclusion for over-ceiling and uncatalogued heartbeat model transitions under strict hello-gate unit tests. The provider-prebeta admission journey is now mapped to capture the active cohort gate posture, admitted model ceiling, and route eligibility; strict-gate production rollout remains pending unless enabled for the cohort."
       }
     },
     {
@@ -1677,13 +1755,15 @@
         "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestAdmissionEvidenceRevalidationRejectsMissingAdmittedTuple",
         "phase4-coordinator/internal/ws/warmup_internal_test.go:TestWarmupGateSkipsStaleAdmissionEvidenceProvider"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "B2 adds the 30s session-time autotune evidence TTL route-exclusion sweep for capped strict hello-gate sessions. Proactive refresh and production deploy evidence remain pending."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "B2 adds the 30s session-time autotune evidence TTL route-exclusion sweep for capped strict hello-gate sessions. The provider-prebeta admission journey is now mapped to record evidence freshness and whether stale-evidence routing exclusion is active for the cohort; proactive refresh and broader production deploy evidence remain pending outside this slice."
       }
     },
     {
@@ -1709,13 +1789,15 @@
         "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateRechecksEvidenceAfterChallenge",
         "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateV1SandboxKeepsProviderBuyerUnroutable"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "B5 parks evidence-absent strict hello-gate providers in a non-buyer/admission-limited/no-credential sandbox, reloads proof_of_weights config without restart, pre-quarantines/revalidates existing sessions on gate enable, clears gate exclusions for credential-authorized sessions, leaves sandbox-only/no-credential sessions sandboxed on gate-disable reload, and clears disabled telemetry-drift benchmark quarantines on reload. Pearl deploy evidence and FR-HG5 below-two alert remain pending."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "B5 parks evidence-absent strict hello-gate providers in a non-buyer/admission-limited/no-credential sandbox, reloads proof_of_weights config without restart, pre-quarantines/revalidates existing sessions on gate enable, clears gate exclusions for credential-authorized sessions, leaves sandbox-only/no-credential sessions sandboxed on gate-disable reload, and clears disabled telemetry-drift benchmark quarantines on reload. The provider-prebeta admission journey is now mapped to record the cohort admission/sandbox posture; FR-HG5 below-two alert and broader Pearl deploy evidence remain pending outside this slice unless enabled."
       }
     },
     {
@@ -1729,13 +1811,15 @@
       "tests": [
         "phase4-coordinator/internal/onboarding/store_pg_attempt_integration_test.go::TestProviderHardwareUpsertsRespectColumnLimitedGrants"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The signed 42efce21 acceptance candidate proved that both authenticated provider hardware-profile UPSERT paths failed under the intended provider_onboarding column-limited grants. This PR repairs the SQL without widening authority; conformance remains pending until a replacement signed candidate completes the physical referral journey."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "The signed 42efce21 acceptance candidate proved that both authenticated provider hardware-profile UPSERT paths failed under the intended provider_onboarding column-limited grants. The SQL has been repaired without widening authority. The provider-prebeta admission journey is now mapped to prove replacement hardware-profile submission and verifier acceptance for the cohort."
       }
     },
     {
@@ -1754,13 +1838,15 @@
         "phase3-binary/Tests/macprovider-cliTests/ReferralCoordinatorClientTests.swift::testXPostURLValidationMatchesCoordinatorBoundary",
         "phase3-binary/app/Tests/MalibuTests/ReferralProjectionTests.swift::testReferralBoundaryNegotiatesByCapabilityNotMarketingVersion"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested; conformance remains pending until the signed production deployment completes the real-X dwell reward and the missing fresh referred-provider journey."
+        "issue": "https://github.com/Augustas11/macprovider/issues/895",
+        "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested. For provider pre-beta, referral/invite admission is scoped to provider admission and now maps to JOURNEY-PROVIDER-PREBETA-ADMISSION; conformance remains pending until #895 captures the current production posture for a fresh provider. Real-X dwell rewards and broad advocacy economics remain outside this slice unless explicitly enabled."
       }
     },
     {
@@ -2010,7 +2096,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the \u00a75a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the §5a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -2025,7 +2111,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per \u00a75a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -3013,6 +3099,214 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "R-11 audit and observability (structured per-attempt settlement audit event; no raw prompts/outputs/receipt material; aggregate verified/pending/quarantined/zero_settled counters; recovery/backfill audit completeness): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R001",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Default-off rail scope, USDC-on-Base operator prerequisites, and activation boundary (§1, §2, §9): preliminary anchor for the existing obligation area; implementation merged default-off by PR #164, but production enablement and §9 operator prerequisite evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R002",
+      "spec_id": "SPEC-016",
+      "state": "conformant",
+      "implementation": [
+        "phase4-coordinator/internal/payout/addresses.go:AddressesService",
+        "phase4-coordinator/internal/payout/addresses.go:ServePayoutChallenge",
+        "phase4-coordinator/internal/payout/addresses.go:ServePayoutAddress",
+        "phase3-binary/Sources/macprovider-cli/PayoutAddressClient.swift:PayoutAddressClient",
+        "phase3-binary/app/Sources/Malibu/Dashboard/PayoutWalletFlow.swift:PayoutWalletFlow"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_HappyPath_FirstRegistration",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_AntiReplay_SecondNonceRejected",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RotationPreservesPayoutAllowed_Zero",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RotationPreservesPayoutAllowed_One",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RateLimit_429AfterWindowBudget",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_PreAuthPauseReturns503Before401",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_TOCTOUPauseFlipDuringTxn_NoRowWritten",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_NonceMismatchInBody_RejectsAsSignatureMismatch",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_DenyList",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_SignatureSkew",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_NonceCanonicalisation_0XReplayDefeated",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_HappyPath",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_IncludesRegisteredAddress",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_UnauthorizedNoToken",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_ForbiddenWrongProvider",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_PreAuthPauseIdenticalBody",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_StructuredLogOnReject",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestMux_ChallengeEscapedURLsAreNotCollapsed",
+        "phase4-coordinator/internal/payout/eip712_test.go:TestVerifyEIP712_HappyPath",
+        "phase4-coordinator/internal/payout/eip712_test.go:TestVerifyEIP712_WrongVerifyingContractRejected",
+        "phase4-coordinator/internal/payout/eip712_test.go:TestVerifyEIP712_WrongNonceRejected",
+        "phase4-coordinator/internal/payout/eip712_fixture_gen_test.go:TestEIP712DigestFixture_MatchesCommitted",
+        "phase4-coordinator/internal/payout/eip712_fixture_gen_test.go:TestEIP712DigestFixture_RoundTripJSSignature",
+        "phase4-coordinator/internal/payout/attempts_test.go:TestSelectReadyPayouts_FiltersByHotWalletAndCoolingOff",
+        "phase3-binary/Tests/macprovider-cliTests/PayoutAddressClientTests.swift:PayoutAddressClientTests",
+        "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:PayoutWalletFlowTests"
+      ],
+      "journeys": [
+        "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
+      ],
+      "evidence": [
+        {
+          "artifact": "commit:57d9813957b1421199b59e5b3f09488f7c9644cd",
+          "source": null,
+          "captured_at": "2026-08-05",
+          "expires_at": "2026-09-05"
+        },
+        {
+          "artifact": "sha256:cce4916a7a89b4edccb350b53cb6c1d48bb0a0e0d4479446d63634d4c8f8c90d",
+          "source": "journeys/evidence/spec016-r002-payout-address-20260805T054857Z.journey-result.signed.json",
+          "captured_at": "2026-08-05",
+          "expires_at": "2026-09-05"
+        }
+      ],
+      "gap": null
+    },
+    {
+      "requirement_id": "SPEC-016-R003",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Payout package boundary, read surfaces, handler inventory, and import-graph ownership (§3.4, §4.1, §7.3): preliminary anchor for the existing obligation area; implementation exists in the coordinator payout package and wiring, but mappings/tests are not yet reconciled to conformant."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R004",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Runner selection, signing, broadcast, two-RPC confirmation, and ClaimPayoutReady finalization (§4.3): preliminary anchor for the existing obligation area; runner implementation merged default-off, but production activation, mapped tests, and journey evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R005",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Payout attempt schema, idempotent retry, nonce-gap fill, cancel self-transfer, and abandon-attempt recovery (§4.5, §4.6): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R006",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Reorg polling, orphan recording, compensation, and funding-recording admin flows (§4.7, §4.9): preliminary anchor for the existing obligation area; implementation merged default-off, but operator runbook evidence and signed journey-result support remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R007",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Runtime flags, pause/resume, runner lease, self-fencing, and crash-safe audit outboxes (§4.8, §4.8a, §4.8b, §4.8c, §6.4.1): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and production evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R008",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Payout caps, hot-wallet balances, gas accounting, and conservation reconciliation (§5, §6.2, §7.4): preliminary anchor for the existing obligation area; implementation merged default-off, but funded-wallet operation and reconciliation evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R009",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Signer custody, Linux-only process hardening, two-RPC discipline, SPKI pinning, and reload boundaries (§6.3, §6.4, §6.5): preliminary anchor for the existing obligation area; implementation merged default-off, but production host evidence and signed journey-result support remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R010",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Structured audit events, retention, operator queries, BetterStack alert filters, and runbook obligations (§7, §9): preliminary anchor for the existing obligation area; implementation and runbook artifacts merged, but alert verification and production evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R011",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Provider-token custody and compliance payout eligibility (§8, v0.1.20 Wave-2 custody gate): preliminary anchor for the existing obligation area; normative custody gate retained through v0.1.23, but provider eligibility policy and production evidence remain pending."
       }
     }
   ]

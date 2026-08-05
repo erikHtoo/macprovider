@@ -103,6 +103,29 @@ provider_runtime = text.split("\n  verify_provider_runtime:\n", 1)[1].split(
 )[0]
 publish = text.split("\n  sign_publish:\n", 1)[1]
 
+TAGGED_PROMOTION_CHECKOUT = (
+    "          ref: ${{ github.event.inputs.promote_run_id != '' "
+    "&& github.event.inputs.version || github.ref }}"
+)
+if TAGGED_PROMOTION_CHECKOUT not in build:
+    raise SystemExit(
+        "promoted releases must checkout the immutable requested tag while candidate builds use main"
+    )
+if build.count('GITHUB_SHA="$commit" bash scripts/verify-release-source.sh') != 1:
+    raise SystemExit(
+        "build source verification must bind GITHUB_SHA to the checked-out release commit"
+    )
+if publish.count(
+    'GITHUB_SHA="${{ needs.build.outputs.commit }}" bash scripts/verify-release-source.sh'
+) != 1 or publish.count(
+    'GITHUB_SHA="$release_commit" bash scripts/verify-release-source.sh'
+) != 1 or publish.count(
+    'GITHUB_SHA="$commit" bash scripts/verify-release-source.sh'
+) != 1:
+    raise SystemExit(
+        "protected publication source gates must bind GITHUB_SHA to the captured release commit"
+    )
+
 
 def unique_step(job, name):
     marker = f"\n      - name: {name}\n"
@@ -111,7 +134,7 @@ def unique_step(job, name):
     return job.split(marker, 1)[1].split("\n      - name:", 1)[0]
 
 
-PEARL_SETUP_GO_SHA = "924ae3a1cded613372ab5595356fb5720e22ba16"
+PEARL_SETUP_GO_SHA = "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
 PEARL_GO_SEAL_STEP = (
     "        if: ${{ github.event.inputs.promote_run_id == '' }}\n"
     "        shell: bash\n"
@@ -160,7 +183,7 @@ PEARL_VERIFY_UPLOAD_SEQUENCE = (
     "\n      - name: Upload unsigned build artifact\n"
 )
 UNSIGNED_UPLOAD_STEP = (
-    "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
+    "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n"
     "        with:\n"
     '          name: unsigned-release-${{ steps.release_source.outputs.commit }}\n'
     "          path: unsigned-release-inputs/\n"
@@ -286,8 +309,7 @@ PROTECTED_OPENSSL_CONSUMERS = (
     ("Prepare release assets", 4, 1),
     ("Require an advancing immutable discovery head", 2, 2),
     ("Create verified draft GitHub release", 1, 1),
-    ("Publish only the revalidated numeric draft", 1, 1),
-    ("Publish one append-only immutable discovery transport", 1, 1),
+    ("Publish only the revalidated numeric draft", 2, 2),
     ("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 0, 0),
 )
 
@@ -390,8 +412,11 @@ def validate_pearl_toolchain(job):
     sealed_go_path = str(pathlib.PurePosixPath(SEALED_GO_EXECUTABLE).parent.parent)
     if job.count(sealed_go_path) != PEARL_GO_SEAL_STEP.count(sealed_go_path):
         raise SystemExit("sealed Go verifier path must appear only in the exact seal step")
+    if SLOW_BUILD_SKIP_GUARD in setup_go:
+        raise SystemExit(
+            "Setup Go for Pearl binaries must remain available when promoting a candidate artifact"
+        )
     for name, step in (
-        ("Setup Go for Pearl binaries", setup_go),
         ("Build Pearl linux-amd64 binaries", pearl_build),
         ("Build package", package_build),
     ):
@@ -1342,21 +1367,39 @@ for requirement in (
 if 'discovery_tag="release-discovery"' in publish or "gh release upload \"$discovery_tag\"" in publish:
     raise SystemExit("release workflow still mutates the permanently immutable fixed discovery release")
 transport_position = publish.find("- name: Publish one append-only immutable discovery transport")
-if transport_position < draft_position:
-    raise SystemExit("append-only discovery transport must publish after the numeric release")
-transport_publish = publish[transport_position:].split("\n      - name:", 1)[0]
+if transport_position >= 0:
+    raise SystemExit("release workflow must defer append-only discovery publication to the rollout workflow")
+workflow_dir = pathlib.Path(sys.argv[1]).resolve().parent
+rollout = (workflow_dir / "verify-live-coordinator-release-rollout.yml").read_text(
+    encoding="utf-8"
+)
+post_gate = rollout.find("scripts/verify-live-coordinator-release-gate.py")
+transport_publish = rollout.find('gh release create "$transport_tag"')
+transport_verify = rollout.find("scripts/verify-release-discovery-transport.py", transport_publish)
+anonymous = rollout.find("scripts/verify-anonymous-release-discovery.sh", transport_verify)
+if post_gate < 0 or transport_publish < post_gate:
+    raise SystemExit("rollout must gate live recommendation before discovery publication")
+final_post_gate = rollout.rfind("scripts/verify-live-coordinator-release-gate.py")
+if rollout.count("--publication-phase post-publication") < 2 or not (
+    post_gate < final_post_gate < transport_publish
+):
+    raise SystemExit("rollout must re-check Pearl immediately before discovery publication")
+if transport_verify < transport_publish or anonymous < transport_verify:
+    raise SystemExit("rollout must verify immutable and anonymous discovery after publication")
 for requirement in (
-    'git ls-remote --tags origin "$transport_tag"',
+    "contents: write",
+    "ref: refs/heads/main",
+    "fetch-depth: 0",
+    "git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main",
+    'git rev-parse origin/main)" = "$GITHUB_SHA"',
+    "--publication-phase post-publication",
+    "--require-immutable",
     "--prerelease",
     "--latest=false",
-    "--transport-tag \"$transport_tag\"",
-    "--require-immutable",
+    'git ls-remote --tags origin "$transport_tag"',
 ):
-    if requirement not in transport_publish:
-        raise SystemExit(f"append-only release transport omits: {requirement}")
-if "--clobber" in transport_publish:
-    raise SystemExit("append-only discovery transport must never overwrite an asset")
-workflow_dir = pathlib.Path(sys.argv[1]).resolve().parent
+    if requirement not in rollout:
+        raise SystemExit(f"post-publication rollout omits: {requirement}")
 renewal = (workflow_dir / "renew-release-discovery-head.yml").read_text(
     encoding="utf-8"
 )
@@ -1375,7 +1418,7 @@ for label, auxiliary, sealed_root, consumer_count in (
         "acceptance promotion",
         promotion,
         "/private/var/macprovider-openssl-acceptance-promotion",
-        5,
+        4,
     ),
 ):
     protected_job = auxiliary.split("\n  verify_public:", 1)[0]
@@ -1488,9 +1531,6 @@ for requirement in (
 ):
     if make_public.find(requirement, patch_position) < 0:
         raise SystemExit(f"post-publication release-state verification is missing: {requirement}")
-anonymous = publish.find("- name: Verify anonymous signed discovery for stable release")
-if anonymous < transport_position or '"$(cat discovery-transport-tag.txt)"' not in publish[anonymous:]:
-    raise SystemExit("anonymous client proof is not bound to the published append-only transport")
 PY
 
 python3 "$pearl_go_verifier" --self-test

@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -198,6 +198,8 @@ struct ServeCommand: AsyncParsableCommand {
     // TestParseHeartbeatAcceptsSpecDecodeOptInFieldsAsForwardCompatible and
     // TestHeartbeatSpecDecodeOptInFieldsPreserveStatePath.
     static let bundledCoordinatorAcceptsSpecDecodeTelemetry = true
+    static let pagedKVStrictStartupRejectEvent =
+        "event=paged_kv_attach status=rejected reason=paged_preflight_reject detail=strict_runtime_proof_unavailable"
 
     static let configuration = CommandConfiguration(
         commandName: "serve",
@@ -209,6 +211,12 @@ struct ServeCommand: AsyncParsableCommand {
 
     @Option(help: "HuggingFace model identifier or local model path. Overrides MACPROVIDER_MODEL and config file model. When this disagrees with config model_artifact_path, the CLI model wins and the configured artifact binding is cleared (#745).")
     var model: String?
+
+    @Option(name: .customLong("model-artifact-sha256"), help: "Lowercase SHA-256 artifact hash for the model snapshot. Used by isolated autotune candidates to bind the child load to the bytes selected by the parent probe.")
+    var modelArtifactSha256: String?
+
+    @Option(name: .customLong("model-artifact-path"), help: "Absolute local model snapshot path paired with --model-artifact-sha256. Used by isolated autotune candidates after hashing the selected bytes.")
+    var modelArtifactPath: String?
 
     @Option(help: "Optional speculative decoding draft model identifier or local path. Overrides MACPROVIDER_DRAFT_MODEL and config key draft_model.")
     var draftModel: String?
@@ -304,6 +312,12 @@ struct ServeCommand: AsyncParsableCommand {
     )
     var prefillStepSize: Int?
 
+    @Option(help: "Continuous batching mode: off, canary, or on. Default off. Strict on fails closed unless the requested tuple is advertised by the local paged-KV engine. Overrides MACPROVIDER_CONTINUOUS_BATCHING and config key continuous_batching.")
+    var continuousBatching: String?
+
+    @Option(help: "Bounded continuous-batching waiting queue limit. Default 2 * active slots. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT and config key continuous_batch_queue_limit.")
+    var continuousBatchQueueLimit: Int?
+
     // SPEC-037 FR-KVP11 — encrypted KV survival disk-tier CLI flags (MEDIUM-5). Each is
     // an Optional so absence defers to the environment / YAML / default; the resolver
     // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
@@ -345,6 +359,18 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .customLong("kv-disk-cache-shutdown-drain-s"), help: "KV disk-tier graceful-shutdown drain budget in seconds (≥0). Overrides MACPROVIDER_KV_DISK_CACHE_SHUTDOWN_DRAIN_S and config key kv_disk_cache.shutdown_drain_seconds.")
     var kvDiskCacheShutdownDrainSeconds: Int?
 
+    @Flag(name: .customLong("paged-kv-enabled"), inversion: .prefixedNo, help: "Opt into the provider-local paged KV engine. Default off; activation still requires attach/parity/packaging gates.")
+    var pagedKVEnabled: Bool?
+
+    @Option(name: .customLong("paged-kv-block-size-tokens"), help: "Paged KV fixed block size in tokens (>0). Overrides MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS and config key paged_kv.block_size_tokens.")
+    var pagedKVBlockSizeTokens: Int?
+
+    @Option(name: .customLong("paged-kv-max-physical-blocks"), help: "Paged KV pool capacity in physical blocks (>0). Overrides MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS and config key paged_kv.max_physical_blocks.")
+    var pagedKVMaxPhysicalBlocks: Int?
+
+    @Option(name: .customLong("paged-kv-fallback-policy"), help: "Paged KV fallback policy: permissive or strict. Overrides MACPROVIDER_PAGED_KV_FALLBACK_POLICY and config key paged_kv.fallback_policy.")
+    var pagedKVFallbackPolicy: String?
+
     /// SPEC-037 FR-KVP11 (MEDIUM-5): the KV disk-tier CLI overrides assembled from the
     /// parsed `--kv-disk-cache-*` flags. Exposed so tests can assert the flag → override
     /// wiring (and CLI-wins precedence / allow_buyer_keys rejection) without running serve.
@@ -362,6 +388,15 @@ struct ServeCommand: AsyncParsableCommand {
             minFreeBytes: kvDiskCacheMinFreeBytes,
             promotionMaxSeconds: kvDiskCachePromotionMaxSeconds,
             shutdownDrainSeconds: kvDiskCacheShutdownDrainSeconds
+        )
+    }
+
+    var pagedKVCLIOverrides: PagedKVCLIOverrides {
+        PagedKVCLIOverrides(
+            enabled: pagedKVEnabled,
+            blockSizeTokens: pagedKVBlockSizeTokens,
+            maxPhysicalBlocks: pagedKVMaxPhysicalBlocks,
+            fallbackPolicy: pagedKVFallbackPolicy
         )
     }
 
@@ -392,6 +427,24 @@ struct ServeCommand: AsyncParsableCommand {
                 throw ExitCode(2)
             }
         }
+    }
+
+    /// Round-2 code MEDIUM-3: autotune candidates must not use speculative
+    /// decoding. The serve-stream speculative path (`collectSpeculativeText`)
+    /// owns its own decode loop and never fires the outer `decodeTimer`, so a
+    /// candidate launched with a configured draft model would emit
+    /// `macprovider_generation_ms: null` and the Stage 1/2 probe would silently
+    /// fall back to client timing (which cannot see a reasoning model's
+    /// suppressed decode window). Force speculative decoding OFF for candidates
+    /// by clearing the resolved draft model so the probe always exercises the
+    /// main, timed decode path. Incumbent serve is untouched.
+    static func applyAutotuneCandidateDraftSuppression(
+        _ resolved: inout AppConfig,
+        autotuneCandidate: Bool
+    ) {
+        guard autotuneCandidate else { return }
+        resolved.draftModel = nil
+        resolved.draftModelArtifactSHA256 = nil
     }
 
     static func runDrainTimeoutPreflight(_ resolved: AppConfig) throws {
@@ -425,6 +478,13 @@ struct ServeCommand: AsyncParsableCommand {
             ).utf8))
             throw ExitCode(2)
         }
+        if let maxBatch = resolved.maxConcurrencyOverride,
+           maxBatch > ProviderCapacity.maxConcurrencyOverrideLimit {
+            FileHandle.standardError.write(Data((
+                "--max-batch \(maxBatch) must be <= \(ProviderCapacity.maxConcurrencyOverrideLimit)\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
         if !(1...16).contains(resolved.numDraftTokens) {
             FileHandle.standardError.write(Data((
                 "--num-draft-tokens \(resolved.numDraftTokens) out of range 1...16\n"
@@ -443,6 +503,24 @@ struct ServeCommand: AsyncParsableCommand {
             ).utf8))
             throw ExitCode(2)
         }
+        if resolved.continuousBatching != .off {
+            if let queueLimit = resolved.continuousBatchQueueLimit, queueLimit < 1 {
+                FileHandle.standardError.write(Data((
+                    "--continuous-batch-queue-limit \(queueLimit) must be >= 1\n"
+                ).utf8))
+                throw ExitCode(2)
+            }
+            let maximumContinuousBatchQueueLimit = ContinuousBatchingPolicy.maximumQueueLimit(
+                maxActiveRows: resolved.maxConcurrencyOverride ?? 1
+            )
+            if let queueLimit = resolved.continuousBatchQueueLimit,
+               queueLimit > maximumContinuousBatchQueueLimit {
+                FileHandle.standardError.write(Data((
+                    "--continuous-batch-queue-limit \(queueLimit) must be <= \(maximumContinuousBatchQueueLimit) for the configured max batch\n"
+                ).utf8))
+                throw ExitCode(2)
+            }
+        }
         if let draftModel = resolved.draftModel,
            draftModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             FileHandle.standardError.write(Data("--draft-model must be non-empty\n".utf8))
@@ -451,6 +529,35 @@ struct ServeCommand: AsyncParsableCommand {
         if let hash = resolved.draftModelArtifactSHA256,
            hash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil {
             FileHandle.standardError.write(Data("draft_model_artifact_sha256 must be 64 lowercase hex characters\n".utf8))
+            throw ExitCode(2)
+        }
+        for error in resolved.pagedKV.errors {
+            FileHandle.standardError.write(Data(("paged_kv: \(error)\n").utf8))
+        }
+        if resolved.pagedKV.effectiveEnabled && resolved.pagedKV.fallbackPolicy == .strict {
+            FileHandle.standardError.write(Data((
+                "\(Self.pagedKVStrictStartupRejectEvent)\n"
+                + "paged_kv strict fallback is unavailable until packaged metallib, kernel, parity, and sizing proof are installed\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+    }
+
+    static func runContinuousBatchingPreflight(_ resolved: AppConfig) throws {
+        let capability = ContinuousBatchingPolicy.configurationCapability(
+            mode: resolved.continuousBatching,
+            maxBatch: resolved.maxConcurrencyOverride ?? 1,
+            queueLimit: resolved.continuousBatchQueueLimit,
+            kvBits: resolved.kvBitsOverride,
+            draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        )
+        if resolved.continuousBatching == .canary {
+            ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
+        }
+        do {
+            try ContinuousBatchingPolicy.validateStrictStartup(capability)
+        } catch let error as APIError {
+            FileHandle.standardError.write(Data("\(error.code): \(error.message)\n".utf8))
             throw ExitCode(2)
         }
     }
@@ -769,12 +876,90 @@ struct ServeCommand: AsyncParsableCommand {
     /// it can be unit-tested with an injected home directory.
     static func lifecycleStateStore(
         autotuneCandidate: Bool,
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        candidateRootDirectory: URL? = nil
     ) -> ProviderLifecycleStateStore {
-        let url = autotuneCandidate
-            ? ProviderLifecycleStateStore.candidateURL(homeDirectory: homeDirectory)
-            : ProviderLifecycleStateStore.defaultURL(homeDirectory: homeDirectory)
+        let url: URL
+        if autotuneCandidate, let candidateRootDirectory {
+            url = ProviderLifecycleStateStore.candidateURL(rootDirectory: candidateRootDirectory)
+        } else if autotuneCandidate {
+            url = ProviderLifecycleStateStore.candidateURL(homeDirectory: homeDirectory)
+        } else {
+            url = ProviderLifecycleStateStore.defaultURL(homeDirectory: homeDirectory)
+        }
         return ProviderLifecycleStateStore(url: url)
+    }
+
+    /// Make a fresh owner-only root for one candidate process. The random
+    /// final component prevents a same-user process from pre-seeding a
+    /// predictable lifecycle, lease, or control path in the temporary area.
+    static func makeCandidateIsolationRoot(
+        // macOS AF_UNIX paths are capped at 104 bytes. The system temporary
+        // directory is often nested under a long per-user path, so use the
+        // short system temp root for the fresh random leaf.
+        temporaryDirectory: URL = URL(fileURLWithPath: "/tmp", isDirectory: true)
+    ) throws -> URL {
+        let root = temporaryDirectory.appendingPathComponent(
+            "macprovider-autotune-" + UUID().uuidString.lowercased(),
+            isDirectory: true
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: root,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            throw NSError(
+                domain: "ServeCommand",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "candidate isolation directory creation failed"]
+            )
+        }
+        var info = stat()
+        guard lstat(root.path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid == geteuid(),
+              (info.st_mode & 0o777) == 0o700 else {
+            try? FileManager.default.removeItem(at: root)
+            throw NSError(
+                domain: "ServeCommand",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "candidate isolation directory is unsafe"]
+            )
+        }
+        return root
+    }
+
+    /// Candidate providers are short-lived local probe processes. Give them
+    /// their own control/switch paths so an autotune run cannot bind the
+    /// incumbent's operator socket or mutate its model-switch marker.
+    static func candidateControlSocketPath(
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+        processID: Int32 = getpid()
+    ) -> String {
+        temporaryDirectory
+            .appendingPathComponent("macprovider-cli", isDirectory: true)
+            .appendingPathComponent("autotune-candidate-\(processID).ctl.sock")
+            .path
+    }
+
+    static func candidateControlSocketPath(rootDirectory: URL) -> String {
+        rootDirectory.appendingPathComponent("control.sock").path
+    }
+
+    static func candidateSwitchStatePath(
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+        processID: Int32 = getpid()
+    ) -> String {
+        temporaryDirectory
+            .appendingPathComponent("macprovider-cli", isDirectory: true)
+            .appendingPathComponent("autotune-candidate-\(processID).switch.ts")
+            .path
+    }
+
+    static func candidateSwitchStatePath(rootDirectory: URL) -> String {
+        rootDirectory.appendingPathComponent("switch.ts").path
     }
 
     func run() async throws {
@@ -784,7 +969,8 @@ struct ServeCommand: AsyncParsableCommand {
         // replace the already-running stale inode; identity must freeze on the
         // binary that matches the signed set's provider_cli member.
         let serveMarkerStore = AutoUpdateMarkerStore()
-        if let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
+        if !autotuneCandidate,
+           let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
            let launched = Bundle.main.executableURL?.standardizedFileURL,
            launched.path != canonical.standardizedFileURL.path {
             try execCanonicalInstall(canonical)
@@ -795,13 +981,16 @@ struct ServeCommand: AsyncParsableCommand {
         // helper before configuration/model work, but only while two durable
         // authorities agree that this exact executable is the intended
         // self-update child. Ordinary launches never touch reload jobs.
-        let startupReloadFenceAuthorized =
-            try Self.fenceAuthorizedSelfUpdateReloadJobsAtStartup()
+        let startupReloadFenceAuthorized = autotuneCandidate
+            ? false
+            : try Self.fenceAuthorizedSelfUpdateReloadJobsAtStartup()
 
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
                 port: port,
                 model: model,
+                modelArtifactPath: modelArtifactPath,
+                modelArtifactSHA256: modelArtifactSha256,
                 draftModel: draftModel,
                 draftModelArtifactSHA256: draftModelArtifactSha256,
                 numDraftTokens: numDraftTokens,
@@ -834,7 +1023,10 @@ struct ServeCommand: AsyncParsableCommand {
                 prefillStepSize: prefillStepSize,
                 // SPEC-037 FR-KVP11 (MEDIUM-5): forward the KV disk-tier flags so the
                 // triple-source config surface (CLI → env → YAML) is complete.
-                kvDiskCache: kvDiskCacheCLIOverrides
+                kvDiskCache: kvDiskCacheCLIOverrides,
+                continuousBatching: continuousBatching,
+                continuousBatchQueueLimit: continuousBatchQueueLimit,
+                pagedKV: pagedKVCLIOverrides
             )
         )
 
@@ -844,16 +1036,48 @@ struct ServeCommand: AsyncParsableCommand {
         // dependencies so direct callers retain the same validation contract.
         try Self.runSupportedModelsPreflight(&resolved)
 
-        // Autotune candidates (`--autotune-candidate`, always with `--no-join`)
-        // share the incumbent's lifecycle directory but persist to a distinct
-        // candidate-scoped store so a successful candidate reaching
-        // `degraded_serving` never overwrites the installed incumbent's
-        // Malibu-visible `state-v1.json` (ARCHITECT finding). The transition
-        // graph is still enforced against the candidate's own history; only the
-        // persistence file changes. Incumbent serve is untouched: same path,
-        // schema, and fields.
-        let lifecycleStateStore = Self.lifecycleStateStore(autotuneCandidate: autotuneCandidate)
-        let lifecycleLeaseStore = ProviderLifecycleLeaseStore()
+        // Round-2 code MEDIUM-3: clear the resolved draft model for autotune
+        // candidates so the speculative route is never taken and the probe
+        // exercises the main, timed decode path. Applied before the draft-model
+        // capacity/artifact preflights and ModelRuntime construction so nothing
+        // downstream sees a draft model for a candidate.
+        Self.applyAutotuneCandidateDraftSuppression(&resolved, autotuneCandidate: autotuneCandidate)
+
+        let candidateIsolationRoot = autotuneCandidate
+            ? try Self.makeCandidateIsolationRoot()
+            : nil
+        defer {
+            if let candidateIsolationRoot {
+                try? FileManager.default.removeItem(at: candidateIsolationRoot)
+            }
+        }
+
+        if autotuneCandidate {
+            // A candidate must be a local, credential-free subprocess. Its
+            // parent may use the production YAML for model/catalog inputs, but
+            // the child must never resolve provider identity, bearer custody,
+            // receipts, coordinator URLs, or incumbent control paths.
+            resolved.providerID = nil
+            resolved.providerToken = nil
+            resolved.coordinatorURL = nil
+            resolved.enableReceipts = false
+            guard let candidateIsolationRoot else {
+                throw ValidationError("candidate isolation root unavailable")
+            }
+            resolved.ctlSocketPath = Self.candidateControlSocketPath(rootDirectory: candidateIsolationRoot)
+            resolved.switchStatePath = Self.candidateSwitchStatePath(rootDirectory: candidateIsolationRoot)
+        }
+
+        // Candidate lifecycle, lease, and singleton-lock files all live under
+        // the fresh owner-only root. This keeps a probe from fencing,
+        // replacing, or being mistaken for the installed provider.
+        let lifecycleStateStore = Self.lifecycleStateStore(
+            autotuneCandidate: autotuneCandidate,
+            candidateRootDirectory: candidateIsolationRoot
+        )
+        let lifecycleLeaseStore = candidateIsolationRoot.map {
+            ProviderLifecycleLeaseStore(url: ProviderLifecycleLeaseStore.candidateURL(rootDirectory: $0))
+        } ?? ProviderLifecycleLeaseStore()
         let existingLifecycle: ProviderLifecycleStateRecord?
         let operatorPausedInitially: Bool
         if case .valid(let record) = lifecycleStateStore.inspect() {
@@ -897,48 +1121,63 @@ struct ServeCommand: AsyncParsableCommand {
         unsetenv("MACPROVIDER_PROVIDER_TOKEN")
 
         let credentialStore = KeychainProviderCredentialStore()
-        _ = try lifecycleStateStore.transition(
-            to: .importingCredentials,
-            reasonCode: "resolving_cli_keychain_custody",
-            writer: .serve,
-            providerID: resolved.providerID,
-            modelID: resolved.model,
-            operationID: lifecycleOperationID
-        )
-        let credentialStatus = try ProviderCredentialResolver.resolve(
-            config: &resolved,
-            store: credentialStore
-        )
-        switch credentialStatus.state {
-        case .locked, .notLoggedIn, .permissionDenied, .keychainFailure, .incompatible, .unavailable:
+        let credentialStatus: ProviderCredentialStatus
+        if autotuneCandidate {
             _ = try lifecycleStateStore.transition(
-                to: .keychainUnavailable,
-                reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                to: .importingCredentials,
+                reasonCode: "candidate_credentials_skipped",
                 writer: .serve,
                 providerID: resolved.providerID,
                 modelID: resolved.model,
                 operationID: lifecycleOperationID
             )
-        case .missing, .unconfigured:
+            credentialStatus = .unconfigured
+        } else {
             _ = try lifecycleStateStore.transition(
-                to: .authenticationRequired,
-                reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                to: .importingCredentials,
+                reasonCode: "resolving_cli_keychain_custody",
                 writer: .serve,
                 providerID: resolved.providerID,
                 modelID: resolved.model,
                 operationID: lifecycleOperationID
             )
-        case .conflict, .corrupt:
-            _ = try lifecycleStateStore.transition(
-                to: .identityMigrationRequired,
-                reasonCode: "credential_\(credentialStatus.state.rawValue)",
-                writer: .serve,
-                providerID: resolved.providerID,
-                modelID: resolved.model,
-                operationID: lifecycleOperationID
+            credentialStatus = try ProviderCredentialResolver.resolve(
+                config: &resolved,
+                store: credentialStore
             )
-        case .ready, .degraded:
-            break
+        }
+        if !autotuneCandidate {
+            switch credentialStatus.state {
+            case .locked, .notLoggedIn, .permissionDenied, .keychainFailure, .incompatible, .unavailable:
+                _ = try lifecycleStateStore.transition(
+                    to: .keychainUnavailable,
+                    reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                    writer: .serve,
+                    providerID: resolved.providerID,
+                    modelID: resolved.model,
+                    operationID: lifecycleOperationID
+                )
+            case .missing, .unconfigured:
+                _ = try lifecycleStateStore.transition(
+                    to: .authenticationRequired,
+                    reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                    writer: .serve,
+                    providerID: resolved.providerID,
+                    modelID: resolved.model,
+                    operationID: lifecycleOperationID
+                )
+            case .conflict, .corrupt:
+                _ = try lifecycleStateStore.transition(
+                    to: .identityMigrationRequired,
+                    reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                    writer: .serve,
+                    providerID: resolved.providerID,
+                    modelID: resolved.model,
+                    operationID: lifecycleOperationID
+                )
+            case .ready, .degraded:
+                break
+            }
         }
         try Self.validateCoordinatorCredential(
             config: resolved,
@@ -962,6 +1201,13 @@ struct ServeCommand: AsyncParsableCommand {
             startupPreflight = try await Self.runServeStartupPreflights(
                 &resolved,
                 joiningCoordinator: !noJoin,
+                acquireServeLock: { candidateConfig in
+                    try Self.acquireProviderServeLock(
+                        candidateConfig,
+                        directory: candidateIsolationRoot?.appendingPathComponent("locks", isDirectory: true)
+                            ?? ProviderServeLock.defaultDirectory()
+                    )
+                },
                 afterServeLockAcquired: {
                     acquiredStartupLease = try Self.acquireStartupLifecycleLease(
                         store: lifecycleLeaseStore,
@@ -999,6 +1245,7 @@ struct ServeCommand: AsyncParsableCommand {
             if let catalogError = error as? ServeCatalogPreflightError {
                 throw catalogError.underlying
             }
+            FileHandle.standardError.write(Data(("provider startup preflight failed: \(error)\n").utf8))
             throw error
         }
         let serveLock = startupPreflight.serveLock
@@ -1048,8 +1295,11 @@ struct ServeCommand: AsyncParsableCommand {
                 numDraftTokens: resolved.numDraftTokens,
                 maxContextTokensOverride: resolved.maxContextOverride,
                 kvBitsOverride: effectiveKVBits,
+                pagedKVConfig: resolved.pagedKV,
                 prefillStepSize: resolved.prefillStepSize,
                 maxBatch: resolved.maxConcurrencyOverride ?? 1,
+                continuousBatchingMode: resolved.continuousBatching,
+                continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
                 warmSwapEnabled: resolved.enableWarmSwap,
                 swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
                 catalogModelIDAlias: catalogModelIDAlias,
@@ -1068,6 +1318,7 @@ struct ServeCommand: AsyncParsableCommand {
                 modelID: resolved.model,
                 operationID: lifecycleOperationID
             )
+            FileHandle.standardError.write(Data(("provider model load failed: \(error)\n").utf8))
             throw error
         }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
@@ -1341,27 +1592,29 @@ struct ServeCommand: AsyncParsableCommand {
             )
         }()
         let admissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(admissionIdentityStatus)
-        let installedCompatibilityManifest: CompatibilitySetManifest? = try { () throws -> CompatibilitySetManifest? in
-            let launched = Bundle.main.executableURL
-            let canonical = serveMarkerStore.resolveCanonicalInstallBinary(launchedExecutableURL: launched)
-            if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
-                launchedExecutableURL: launched,
-                canonicalBinaryURL: canonical,
-                expectedVersion: CoordinatorClient.binaryVersion,
-                allowProviderVersionMismatch: false
-            ) {
-                return installed
-            }
-            // Fail closed when a sibling/canonical manifest exists but is invalid.
-            let authority = canonical ?? CompatibilitySetManifest.resolvedExecutableURL(launched)
-            guard let directory = CompatibilitySetManifest.payloadDirectory(for: authority) else { return nil }
-            let manifestURL = directory.appendingPathComponent(CompatibilitySetManifest.fileName)
-            guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
-            return try CompatibilitySetManifest.loadValidated(
-                from: directory,
-                expectedProviderVersion: CoordinatorClient.binaryVersion
-            )
-        }()
+        let installedCompatibilityManifest: CompatibilitySetManifest? = autotuneCandidate
+            ? nil
+            : try { () throws -> CompatibilitySetManifest? in
+                let launched = Bundle.main.executableURL
+                let canonical = serveMarkerStore.resolveCanonicalInstallBinary(launchedExecutableURL: launched)
+                if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                    launchedExecutableURL: launched,
+                    canonicalBinaryURL: canonical,
+                    expectedVersion: CoordinatorClient.binaryVersion,
+                    allowProviderVersionMismatch: false
+                ) {
+                    return installed
+                }
+                // Fail closed when a sibling/canonical manifest exists but is invalid.
+                let authority = canonical ?? CompatibilitySetManifest.resolvedExecutableURL(launched)
+                guard let directory = CompatibilitySetManifest.payloadDirectory(for: authority) else { return nil }
+                let manifestURL = directory.appendingPathComponent(CompatibilitySetManifest.fileName)
+                guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
+                return try CompatibilitySetManifest.loadValidated(
+                    from: directory,
+                    expectedProviderVersion: CoordinatorClient.binaryVersion
+                )
+            }()
         if resolved.donorMode {
             FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
         }
@@ -1542,6 +1795,8 @@ struct ServeCommand: AsyncParsableCommand {
             if let serverError = error as? ControlSocketServerError,
                serverError != .staleSocket(path: socketURL.path) {
                 FileHandle.standardError.write(Data(("\(serverError.description)\n").utf8))
+            } else if !(error is ControlSocketServerError) {
+                FileHandle.standardError.write(Data(("provider control socket failed: \(error)\n").utf8))
             }
             throw ExitCode(1)
         }
@@ -1611,7 +1866,12 @@ struct ServeCommand: AsyncParsableCommand {
             terminationHandlers.forEach { $0.cancel() }
         }
         try withExtendedLifetime(terminationHandlers) {
-            try server.run()
+            do {
+                try server.run()
+            } catch {
+                FileHandle.standardError.write(Data(("provider HTTP server stopped: \(error)\n").utf8))
+                throw error
+            }
         }
     }
 
@@ -1624,9 +1884,16 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
-    static func acquireProviderServeLock(_ config: AppConfig) throws -> ProviderServeLock {
+    static func acquireProviderServeLock(
+        _ config: AppConfig,
+        directory: URL = ProviderServeLock.defaultDirectory()
+    ) throws -> ProviderServeLock {
         do {
-            return try ProviderServeLock.acquire(providerID: config.providerID, port: config.port)
+            return try ProviderServeLock.acquire(
+                providerID: config.providerID,
+                port: config.port,
+                directory: directory
+            )
         } catch let error as ProviderServeLockError {
             FileHandle.standardError.write(Data((
                 "provider singleton conflict: \(error.description)\n"
@@ -2013,7 +2280,9 @@ struct ServeCommand: AsyncParsableCommand {
         joiningCoordinator: Bool,
         coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
         portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
-        acquireServeLock: (AppConfig) throws -> ProviderServeLock = Self.acquireProviderServeLock,
+        acquireServeLock: (AppConfig) throws -> ProviderServeLock = { config in
+            try Self.acquireProviderServeLock(config)
+        },
         afterServeLockAcquired: () throws -> Void = {},
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
@@ -2056,7 +2325,9 @@ struct ServeCommand: AsyncParsableCommand {
         _ resolved: inout AppConfig,
         coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
         portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
-        acquireServeLock: (AppConfig) throws -> ProviderServeLock = Self.acquireProviderServeLock
+        acquireServeLock: (AppConfig) throws -> ProviderServeLock = { config in
+            try Self.acquireProviderServeLock(config)
+        }
     ) throws -> ProviderServeLock {
         try Self.runSupportedModelsPreflight(&resolved)
         try Self.runDrainTimeoutPreflight(resolved)
@@ -2066,6 +2337,7 @@ struct ServeCommand: AsyncParsableCommand {
             coordinatorAcceptsSpecDecodeTelemetry: coordinatorAcceptsSpecDecodeTelemetry
         )
         try Self.runSpecDecodeCapacityPreflight(&resolved)
+        try Self.runContinuousBatchingPreflight(resolved)
 
         let serveLock = try acquireServeLock(resolved)
         do {
@@ -2369,6 +2641,8 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  kv_bits: \(config.kvBitsOverride.map(String.init) ?? "<unset, mlx default>")")
     print("  max_context: \(config.maxContextOverride.map(String.init) ?? "<unset, per-tier default>")")
     print("  max_batch: \(config.maxConcurrencyOverride.map(String.init) ?? "1")")
+    print("  continuous_batching: \(config.continuousBatching.rawValue)")
+    print("  continuous_batch_queue_limit: \(config.continuousBatchQueueLimit.map(String.init) ?? "<unset, 2 * max_batch>")")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  idle_prewarm.enabled: \(config.idlePrewarmEnabled)")
     print("  idle_prewarm.idle_threshold_seconds: \(config.idlePrewarmIdleThresholdSeconds)")

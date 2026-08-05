@@ -30,11 +30,11 @@ let package = Package(
         // issue #718) binds to the same reviewed version.
         .package(
             url: "https://github.com/huggingface/swift-jinja.git",
-            exact: "2.3.6"
+            exact: "2.4.2"
         ),
         .package(
             url: "https://github.com/apple/swift-nio.git",
-            exact: "2.101.2"
+            exact: "2.101.3"
         ),
         .package(
             url: "https://github.com/apple/swift-argument-parser.git",
@@ -83,6 +83,13 @@ let package = Package(
             dependencies: [
                 "MacProviderCore",
                 "macprovider-cli",
+                // Real-model paged-KV parity fixtures (PagedKVParityTests) load MLX models
+                // from the local HF cache and drive the paged gather. Test-target only —
+                // the shipped product dependency set / pins are unchanged.
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Tests/macprovider-cliTests",
             resources: [

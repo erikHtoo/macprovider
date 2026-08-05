@@ -97,12 +97,22 @@ insufficient, a conformance state, and evidence. Allowed states are
 - Every journey ID resolves to `journeys/JOURNEY-NAME.md`; an invented ID is
   not evidence. Sensitive conformant requirements also carry a recomputable
   SHA-256 artifact under `journeys/evidence/`.
-- The governance foundation deliberately rejects `physically-verified` and
-  `production_status: physically-verified` promotion until Phase 5 defines
-  and validates a structured signed journey-result contract. Authority domains
-  that require that contract set `requires_signed_journey_result: true` in
-  `AUTHORITY.json`; requirements in those domains cannot become `conformant`
-  until the contract exists. A Markdown journey description or digest alone
+- Authority domains that require a signed physical result set
+  `requires_signed_journey_result: true` in `AUTHORITY.json`. Requirements in
+  those domains can become `conformant` only when a mapped journey has a
+  SHA-256 evidence artifact under `journeys/evidence/` whose bytes reproduce
+  the digest and whose signed envelope has the shape defined by
+  `schemas/journey-result-v1.schema.json`. The governance validator is the
+  normative enforcement path for semantic checks the schema cannot prove by
+  itself: an `ecdsa-p256-sha256` signature over
+  `macprovider.journey-result.v1\n` plus canonical sorted compact JSON,
+  verified against the pinned
+  `security/acceptance-candidate-signing-public.pem` trust anchor, the mapped
+  journey ID, the promoted requirement ID, a repository commit matching the
+  requirement's commit evidence, operator and environment bindings, a passing
+  run result, passing step results that reference hash-bound artifacts, current
+  expiry, and explicit redaction confirmations. A Markdown journey description,
+  arbitrary digest, mutable public key, or self-asserted signature status alone
   cannot promote lifecycle state.
 - Evidence records the proving reachable commit or an immutable artifact whose
   repository source bytes reproduce its SHA-256 digest, plus capture date and
@@ -145,6 +155,31 @@ only when the affected normative SPEC and decision log both name its exact
 scope, evidence, rollback, expiry, and unresolved journey. Such an exception
 cannot mark the missing evidence conformant or close #613. Missing, stale,
 skipped, or failed evidence otherwise blocks promotion.
+
+## Release-scoped reconciliation slices
+
+Issue #614 is the complete reconciliation program, not a standing blocker for
+every release. A bounded release may name a narrower reconciliation slice when
+the release scope is explicit, owned, and evidence-backed.
+
+A release-scoped slice must record:
+
+- the product outcome being released;
+- the SPEC IDs, requirement IDs, and authority domains that are active for that
+  outcome;
+- the specs and requirements that are default-off, future, historical,
+  not-deployed, or otherwise outside the release scope;
+- the minimum journeys, automated tests, and production or physical evidence
+  required for that outcome;
+- the stop condition for promotion and the issue that tracks any remaining
+  non-blocking conformance debt.
+
+Unknown governance debt outside the named slice does not block the scoped
+release. Unknown governance debt inside the named slice must be arbitrated as
+`CODE_BUG`, `SPEC_BUG`, `DECISION_REQUIRED`, `DUPLICATE_AUTHORITY`, `UNKNOWN`,
+`not-applicable`, or `not-deployed` before promotion. A release-scoped slice
+may narrow the gate; it may not mark a requirement conformant without the
+evidence required by this process.
 
 Every PR body contains exactly one raw, marker-delimited JSON declaration:
 
