@@ -1173,7 +1173,7 @@
       "implementation": [
         "phase4-coordinator/internal/requestlog/store.go:Row",
         "phase4-coordinator/internal/buyer/phase_timing.go:requestLogTTFTMs",
-        "phase4-coordinator/internal/buyer/billing_recorder.go:record"
+        "phase4-coordinator/internal/buyer/billing_recorder.go:recordRow"
       ],
       "tests": [
         "phase4-coordinator/internal/requestlog/store_test.go::TestRequestLogMigratesExistingTable",
@@ -1237,10 +1237,10 @@
     {
       "requirement_id": "SPEC-010-R001",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let snapshotManifestV1",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:verifiedModelArtifactSHA256",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:verifiedCatalogArtifactSHA256",
         "phase4-coordinator/internal/modelidentity/identity.go:SnapshotManifestV1"
       ],
       "tests": [
@@ -1250,18 +1250,26 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "Issue #609 implements and unit-tests the canonical Air artifact identity. The provider-prebeta admission journey is now mapped as the scoped physical proof path for admitted model identity; conformance remains pending until #895 captures the exact admitted artifact and #896 supplies the signed journey-result contract required for sensitive promotion."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:6a2278f4f678abcc91361d0d6f008649e63b6fc3",
+          "source": null,
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        },
+        {
+          "artifact": "sha256:77bdb6b513d01839e6acfdfa2aa8475d7ff0b9acd3a7c124b59c4577b6d548d1",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-20260727T042339Z.spec-010-r001.journey-result.signed.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-010-R002",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:authInitialMessage",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:sendHeartbeat",
@@ -1275,22 +1283,30 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "Issue #609 implements typed admission and heartbeat semantics. The provider-prebeta admission journey is now mapped as the scoped production proof path; conformance remains pending until #895 proves the production coordinator receives and preserves the named identity and #896 supplies the signed journey-result contract required for sensitive promotion."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:6a2278f4f678abcc91361d0d6f008649e63b6fc3",
+          "source": null,
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        },
+        {
+          "artifact": "sha256:288348caef7f3c92f3028cbc34cb92b5697e14d8b85c5f329f4d7145ddb1253a",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-20260727T042339Z.journey-result.signed.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-010-R003",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let safetensorsManifestV1",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func modelWeightArtifactManifestHash",
-        "phase4-coordinator/internal/pool/provider.go:WeightsManifestSHA256 string"
+        "phase4-coordinator/internal/pool/provider.go:type HeartbeatUpdate"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapBootTrustDoesNotCompareWeightManifestToCanonicalArtifactHash",
@@ -1299,13 +1315,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "Issue #609 separates weights diagnostics from catalog authority in code and tests. The provider-prebeta admission journey is now mapped as the scoped physical proof path; conformance remains pending until #895 captures the provider catalog/model evidence and #896 supplies the signed journey-result contract required for sensitive promotion."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:6a2278f4f678abcc91361d0d6f008649e63b6fc3",
+          "source": null,
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        },
+        {
+          "artifact": "sha256:7f838018cc946cd780f43ad5d2a0c45cc3b0f9a77612c4a5e6e9cf000d3990ed",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-20260727T042339Z.spec-010-r003.journey-result.signed.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-010-R004",
@@ -1522,11 +1546,11 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:applyValidatedUpdate",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
-        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:writeSuccessSentinel",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:func writeSuccessSentinel(binaryURL: URL, marker: AutoUpdatePendingMarker)",
         "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:readSuccessSentinel",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:localSignedSetRecoveryAllowed",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:commitPendingAutoupdateAfterServingProof",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:runStartupAutoupdateRecovery"
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func runStartupAutoupdateRecovery()"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReadinessFailureRollsBackReplacement",
@@ -1569,7 +1593,7 @@
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:waitForStableLocalAutoupdateHealth",
         "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:fenceAuthorizedSelfUpdateReloadJobsAtStartup",
         "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:recoverAdoptedStartupHandoff",
-        "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:launchdServiceProcessID",
+        "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:static func launchdServiceProcessID",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:fenceProviderReloadLaunchdJobs",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:launchctlServiceLoadedOrThrow",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:providerReloadLaunchAgentData",
@@ -1687,7 +1711,7 @@
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:var benchmarkedCount",
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func humanTranscript",
         "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func donorModeApplyWarning",
-        "phase3-binary/dist/install.sh:run_autotune_recommend_apply"
+        "phase3-binary/dist/install.sh:run_autotune_recommend_apply()"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testRecommendationJSONCarriesBenchGateProvenanceAndDrift",
@@ -1829,7 +1853,7 @@
       "implementation": [
         "phase4-coordinator/internal/referralapi/xapi.go:parseJoinBaseURL",
         "phase4-coordinator/internal/referralapi/validate.go:ValidationHandler",
-        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:referral_fragment_links_v1",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:localStatusCapabilities",
         "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:hasTrustedReferralBoundary"
       ],
       "tests": [
@@ -1984,7 +2008,7 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func diagnosticStatusPayloadForTest",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func sendDiagnosticStatus",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func sendDiagnosticStatus",
         "phase4-coordinator/internal/ws/messages.go:func ParseDiagnosticStatus",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) handleDiagnosticStatus",
         "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) UpsertLastKnown",
